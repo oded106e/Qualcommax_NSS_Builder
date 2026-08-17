@@ -26,7 +26,6 @@ env:
   TARGET: qualcommax/ipq807x
   VARIANT: edma-nss
   RELEASE_PREFIX: edma-nss
-  MESH_RELEASE_PREFIX: edma-nss-mesh
   KEEP: "2"
   FEEDS: "src-git nss https://github.com/JuliusBairaktaris/nss-packages.git;edma-nss"
 
@@ -62,7 +61,6 @@ jobs:
       NSS_SHA: ${{ needs.check.outputs.nss_sha }}
     outputs:
       tag: ${{ steps.draft.outputs.tag }}
-      mesh_tag: ${{ steps.draft.outputs.mesh_tag }}
     steps:
       - id: draft
         run: |
@@ -85,10 +83,6 @@ jobs:
               fi
               echo "- **Trigger**: \`${GITHUB_EVENT_NAME}\`"
               echo
-              if [[ "$prefix" == "$MESH_RELEASE_PREFIX" ]]; then
-                echo "**802.11s mesh offload build.**"
-                echo
-              fi
               echo "Pick the sysupgrade image and flash over OpenWrt."
             } >release_notes.md
 
@@ -103,11 +97,10 @@ jobs:
 
           {
             echo "tag=$(draft "$RELEASE_PREFIX" "$VARIANT")"
-            echo "mesh_tag=$(draft "$MESH_RELEASE_PREFIX" "$MESH_RELEASE_PREFIX")"
           } >>"$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.device }} (${{ matrix.flavour }})
+    name: Build ${{ matrix.device }}
     needs: [check, release]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
@@ -118,17 +111,10 @@ jobs:
       matrix:
         device:
           - xiaomi_ax3600
-        flavour:
-          - default
-          - mesh
-        include:
-          - flavour: mesh
-            config_fragment: devices/common/config.mesh
     env:
       GH_TOKEN: ${{ github.token }}
       DEVICE: ${{ matrix.device }}
-      CONFIG_FRAGMENT: ${{ matrix.config_fragment }}
-      TAG: ${{ matrix.flavour == 'mesh' && needs.release.outputs.mesh_tag || needs.release.outputs.tag }}
+      TAG: ${{ needs.release.outputs.tag }}
     steps:
       - name: Install build dependencies
         run: |
@@ -239,7 +225,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.release.outputs.tag }}
-      MESH_TAG: ${{ needs.release.outputs.mesh_tag }}
       BUILD_RESULT: ${{ needs.build.result }}
     steps:
       - name: Publish or discard
@@ -247,11 +232,9 @@ jobs:
           set -euo pipefail
           if [[ "$BUILD_RESULT" != "success" ]]; then
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
-            gh release delete "$MESH_TAG" --repo "$GITHUB_REPOSITORY" --yes
-            echo "::error::a build group failed ($BUILD_RESULT); drafts discarded"
+            echo "::error::a build group failed ($BUILD_RESULT); draft discarded"
             exit 1
           fi
-          gh release edit "$MESH_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   prune:
@@ -270,4 +253,3 @@ jobs:
         run: |
           set -euo pipefail
           PREFIX="$RELEASE_PREFIX" bash scripts/prune-releases.sh
-          PREFIX="$MESH_RELEASE_PREFIX" bash scripts/prune-releases.sh
