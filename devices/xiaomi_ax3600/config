@@ -9,16 +9,63 @@ CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600=y
 # 512 MB board: the ath11k profile is also forced by kmod-ath11k's NSS block,
 # and the NSS MEDIUM profile replaces the ipq807x default (HIGH), which does
 # not fit here.
-CONFIG_ATH11K_MEM_PROFILE_512M=y
-CONFIG_NSS_MEM_PROFILE_MEDIUM=y
 
+##qca9887
 CONFIG_ATH10K-CT_LEDS=n
 CONFIG_PACKAGE_ath10k-board-qca9887=n
 CONFIG_PACKAGE_ath10k-firmware-qca9887=n
 CONFIG_PACKAGE_ath10k-firmware-qca9887-ct=n
 CONFIG_PACKAGE_kmod-ath10k-ct-smallbuffers=n
 
-## Hardware this board does not have.
+## Device Memory Profiles
+CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600=y
+CONFIG_ATH11K_MEM_PROFILE_512M=y
+CONFIG_IPQ_MEM_PROFILE_512=y
+CONFIG_KERNEL_IPQ_MEM_PROFILE=512
+CONFIG_NSS_MEM_PROFILE_MEDIUM=y
+
+## OpenSSH with PAM Support (Override)
+CONFIG_PACKAGE_openssh-server=n
+CONFIG_PACKAGE_openssh-server-pam=y
+
+## Dynamic DNS (DDNS)
+CONFIG_PACKAGE_ddns-scripts=y
+CONFIG_PACKAGE_ddns-scripts_services=y
+CONFIG_PACKAGE_luci-app-ddns=y
+
+## Etherwake (Wake-on-LAN)
+CONFIG_PACKAGE_etherwake=y
+CONFIG_PACKAGE_luci-app-wol=y
+
+## Web Terminal (ttyd)
+CONFIG_PACKAGE_ttyd=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+
+## Python, Mail, Diagnostic Tools & Policy Based Routing
+CONFIG_PACKAGE_python3=y
+CONFIG_PACKAGE_python3-light=n
+CONFIG_PACKAGE_msmtp-mta=y
+CONFIG_PACKAGE_nail=y
+CONFIG_PACKAGE_tcpdump=y
+CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
+CONFIG_PACKAGE_libnetfilter-conntrack3=y
+CONFIG_PACKAGE_luci-app-pbr=y
+
+## Wireguard VPN
+CONFIG_PACKAGE_kmod-wireguard=y
+CONFIG_PACKAGE_wireguard-tools=y
+CONFIG_PACKAGE_luci-proto-wireguard=y
+
+## UPnP Daemon & UI
+CONFIG_PACKAGE_miniupnpd=y
+CONFIG_PACKAGE_luci-app-upnp=y
+
+## Network & Driver Tweaks
+CONFIG_PACKAGE_kmod-tcp-bbr=y
+CONFIG_ATH11K_DEBUGFS_STA=n
+CONFIG_ATH11K_THERMAL=n
+
+## Disable Unused USB & Ethernet Hardware (Slim Image)
 CONFIG_PACKAGE_kmod-phy-aquantia=n
 CONFIG_PACKAGE_kmod-usb-core=n
 CONFIG_PACKAGE_kmod-usb-dwc3=n
