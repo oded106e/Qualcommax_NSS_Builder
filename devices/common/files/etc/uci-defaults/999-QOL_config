@@ -12,7 +12,7 @@ uci -q batch << EOI
 # the first boot - no detection race - but disabled until the user sets a key).
 
 # Firewall settings
-set firewall.@zone[1].input='DROP'
+set firewall.@zone[1].input='Allow'
 
 # Network settings (BCP38 anti-spoofing on WAN).
 set bcp38.cfg018e45.enabled='1'
@@ -24,7 +24,7 @@ set bcp38.cfg018e45.interface='wan'
 set system.ntp.enable_server='1'
 
 # uHTTPd settings
-set uhttpd.main.redirect_https='1'
+set uhttpd.main.redirect_https='0'
 
 EOI
 
