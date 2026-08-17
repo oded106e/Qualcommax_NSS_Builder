@@ -177,6 +177,24 @@ jobs:
           BUILDER_REPO: ${{ github.workspace }}/builder
         run: bash builder/scripts/prepare-build.sh
 
+# תוספת: מתן הרשאות הרצה לסקריפטים
+      - name: Set executable permissions for scripts
+        run: |
+          SCRIPTS_TO_EXEC=(
+            "openwrt/files/etc/uci-defaults/99-mwan3-delay"
+            "openwrt/files/etc/ssh/disable_guests_wifi.sh"
+            "openwrt/files/etc/ssh/login-notify.sh"
+            "openwrt/files/etc/ssh/multicast-relay.py"
+            "openwrt/files/etc/ssh/used-to-run-scripts.sh"
+            "openwrt/files/etc/ssh/wakeuppc.sh"
+          )
+          for script in "${SCRIPTS_TO_EXEC[@]}"; do
+            if [ -f "$script" ]; then
+              echo "Setting 755 permissions for: $script"
+              chmod 755 "$script"
+            fi
+          done        
+
       - name: Set reproducible-build env
         working-directory: openwrt
         run: |
