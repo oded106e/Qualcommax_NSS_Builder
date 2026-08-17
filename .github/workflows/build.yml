@@ -137,7 +137,7 @@ jobs:
       fail-fast: false
       matrix:
         device: [xiaomi_ax3600]
-        flavour: [default]
+        flavour: [default, mesh]
         include:
           - flavour: mesh
             config_fragment: devices/common/config.mesh
