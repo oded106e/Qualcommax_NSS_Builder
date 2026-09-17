@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 import binascii
@@ -64,61 +64,63 @@ class Logger():
             print(args, kwargs)
 
 class Netifaces():
-    def __init__(self, homebrewNetifaces, ifNameStructLen):
-        self.homebrewNetifaces = homebrewNetifaces
-        self.ifNameStructLen = ifNameStructLen
-        if self.homebrewNetifaces:
-            Netifaces.AF_LINK = 1
-            Netifaces.AF_INET = 2
-            self.interfaceAttrs = {}
-        else:
-            import netifaces
-            Netifaces.AF_LINK = netifaces.AF_LINK
-            Netifaces.AF_INET = netifaces.AF_INET
+    """
+    Self-contained stand-in for the third-party 'netifaces' package.
+
+    netifaces is unmaintained upstream and, as of OpenWrt 25.12, is no
+    longer available as an opkg package (python3-netifaces was dropped
+    from the feed). This talks to the kernel directly via a handful of
+    ioctl() calls instead, so nothing beyond the Python standard library
+    (fcntl/array/socket/struct, all part of python3-light) is required.
+    """
+    AF_LINK = 1
+    AF_INET = 2
+
+    def __init__(self, ifNameStructLen=None):
+        # struct ifreq, as filled in by SIOCGIFCONF, is 32 bytes on
+        # 32-bit userspace and 40 bytes on 64-bit userspace. Most OpenWrt
+        # targets (mips, arm, etc.) are 32-bit, so auto-detect this from
+        # the interpreter's native pointer size instead of assuming
+        # 64-bit. --ifNameStructLen can still be passed to override this
+        # if a particular target needs something different.
+        self.ifNameStructLen = ifNameStructLen or (40 if struct.calcsize('P') == 8 else 32)
+        self.interfaceAttrs = {}
 
     def interfaces(self):
-        if self.homebrewNetifaces:
-            import array
-            import fcntl
+        import array
+        import fcntl
 
-            maxInterfaces = 128
-            bufsiz = maxInterfaces * 40
-            nullByte = b'\0'
+        maxInterfaces = 128
+        bufsiz = maxInterfaces * self.ifNameStructLen
+        nullByte = b'\0'
 
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            ifNames = array.array('B', nullByte * bufsiz)
-            ifNameLen = struct.unpack('iL', fcntl.ioctl(
-                s.fileno(),
-                0x8912, # SIOCGIFCONF
-                struct.pack('iL', bufsiz, ifNames.buffer_info()[0])
-            ))[0]
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ifNames = array.array('B', nullByte * bufsiz)
+        ifNameLen = struct.unpack('iL', fcntl.ioctl(
+            s.fileno(),
+            0x8912, # SIOCGIFCONF
+            struct.pack('iL', bufsiz, ifNames.buffer_info()[0])
+        ))[0]
 
-            if ifNameLen % self.ifNameStructLen != 0:
-                print('Do you need to set --ifNameStructLen? %s/%s ought to have a remainder of zero.' % (ifNameLen, self.ifNameStructLen))
+        if ifNameLen % self.ifNameStructLen != 0:
+            print('Do you need to set --ifNameStructLen? %s/%s ought to have a remainder of zero.' % (ifNameLen, self.ifNameStructLen))
+            sys.exit(1)
+
+        ifNames = ifNames.tobytes()
+        for i in range(0, ifNameLen, self.ifNameStructLen):
+            name      = ifNames[i:i+16].split(nullByte, 1)[0].decode()
+            if not name:
+                print('Cannot determine interface name: do you need to set --ifNameStructLen? %s/%s ought to have a remainder of zero.' % (ifNameLen, self.ifNameStructLen))
                 sys.exit(1)
-
-            ifNames = ifNames.tobytes()
-            for i in range(0, ifNameLen, self.ifNameStructLen):
-                name      = ifNames[i:i+16].split(nullByte, 1)[0].decode()
-                if not name:
-                    print('Cannot determine interface name: do you need to set --ifNameStructLen? %s/%s ought to have a remainder of zero.' % (ifNameLen, self.ifNameStructLen))
-                    sys.exit(1)
-                ip        = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8915, struct.pack('256s', name.encode('utf-8')))[20:24]) # SIOCGIFADDR
-                netmask   = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x891b, struct.pack('256s', name.encode('utf-8')))[20:24]) # SIOCGIFNETMASK
-                broadcast = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8919, struct.pack('256s', name.encode('utf-8')))[20:24]) # SIOCGIFBRDADDR
-                hwaddr    = ':'.join(['%02x' % b for b in fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8927, struct.pack('256s', name.encode('utf-8')))[18:24]]) # SIOCGIFHWADDR
-                self.interfaceAttrs[name] = {Netifaces.AF_LINK: [{'addr': hwaddr}], Netifaces.AF_INET: [{'addr': ip, 'netmask': netmask, 'broadcast': broadcast}]}
-            return self.interfaceAttrs.keys()
-        else:
-            import netifaces
-            return netifaces.interfaces()
+            ip        = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8915, struct.pack('256s', name.encode()))[20:24]) # SIOCGIFADDR
+            netmask   = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x891b, struct.pack('256s', name.encode()))[20:24]) # SIOCGIFNETMASK
+            broadcast = socket.inet_ntoa(fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8919, struct.pack('256s', name.encode()))[20:24]) # SIOCGIFBRDADDR
+            hwaddr    = ':'.join(['%02x' % char for char in fcntl.ioctl(socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 0x8927, struct.pack('256s', name.encode()))[18:24]]) # SIOCGIFHWADDR
+            self.interfaceAttrs[name] = {Netifaces.AF_LINK: [{'addr': hwaddr}], Netifaces.AF_INET: [{'addr': ip, 'netmask': netmask, 'broadcast': broadcast}]}
+        return list(self.interfaceAttrs.keys())
 
     def ifaddresses(self, interface):
-        if self.homebrewNetifaces:
-            return self.interfaceAttrs[interface]
-        else:
-            import netifaces
-            return netifaces.ifaddresses(interface)
+        return self.interfaceAttrs[interface]
 
 class Cipher():
     def __init__(self, key):
@@ -174,13 +176,11 @@ class PacketRelay():
     IPV4LEN           = len(socket.inet_aton('0.0.0.0'))
 
     def __init__(self, interfaces, noTransmitInterfaces, ifFilter, waitForIP, ttl,
-                 oneInterface, homebrewNetifaces, ifNameStructLen, allowNonEther,
+                 oneInterface, ifNameStructLen, allowNonEther,
                  ssdpUnicastAddr, mdnsForceUnicast, masquerade, listen, remote,
-                 remotePort, remoteRetry, noRemoteRelay, aes, logger, noQueryInterfaces,
-                 noAdvertiseInterfaces):
+                 remotePort, remoteRetry, noRemoteRelay, aes, logger):
         self.interfaces = interfaces
         self.noTransmitInterfaces = noTransmitInterfaces or []
-        self.noAdvertiseInterfaces = noAdvertiseInterfaces or []
 
         if ifFilter:
             with open(ifFilter) as fd:
@@ -195,12 +195,11 @@ class PacketRelay():
         self.allowNonEther = allowNonEther
         self.masquerade = masquerade or []
 
-        self.nif = Netifaces(homebrewNetifaces, ifNameStructLen)
+        self.nif = Netifaces(ifNameStructLen)
         self.logger = logger
 
         self.transmitters = []
         self.receivers = []
-        self.receiverInterfaces = {}
         self.etherAddrs = {}
         self.etherType = struct.pack('!H', 0x0800)
         self.udpMaxLength = 1458
@@ -233,8 +232,6 @@ class PacketRelay():
 
         self.remoteConnections = []
 
-        self.noQueryInterfaces = noQueryInterfaces or []
-
         if self.listenAddr:
             self.listenSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listenSock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -242,10 +239,6 @@ class PacketRelay():
             self.listenSock.listen(0)
         elif self.remoteAddrs:
             self.connectRemotes()
-        self.ip_mac_map = {}
-        for interface in self.interfaces:
-            (ifname, mac, ip, netmask, broadcast) = self.getInterface(interface)
-            self.ip_mac_map[ip] = mac
 
     def connectRemotes(self):
         for remote in self.remoteAddrs:
@@ -289,99 +282,61 @@ class PacketRelay():
         elif self.isMulticast(addr):
             self.etherAddrs[addr] = self.multicastIpToMac(addr)
         else:
-            # Unicast -- we don't know yet which IP we'll want to send to
+            # unicast -- we don't know yet which IP we'll want to send to
             self.etherAddrs[addr] = None
 
+            rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+            rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            rx.bind((addr, port))
+            self.receivers.append(rx)
+
         # Set up the receiving socket and corresponding IP and interface information.
-        # One receiving socket is required per multicast address per interface.
-        # For unicast and broadcast, we'll also create a socket per interface to
-        # ensure we can determine the receiving interface.
-
+        # One receiving socket is required per multicast address. But for extra
+        # fun, one receiving socket for each network interface, if we're
+        # intercepting broadcast packets.
         if self.isMulticast(addr):
-            # For each interface, create a socket bound to that interface
-            for interface in self.interfaces:
-                (ifname, mac, ip, netmask, broadcast) = self.getInterface(interface)
-                rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-                rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                mreq = struct.pack('4s4s', socket.inet_aton(addr), socket.inet_aton(ip))
-                rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                rx.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, ifname.encode('utf-8'))
-                rx.bind((addr, port))
-                self.receivers.append(rx)
-                self.receiverInterfaces[rx] = ifname  # Associate the receiver with the interface
+            rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+            rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-                if interface not in self.noTransmitInterfaces:
-                    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-                    tx.bind((ifname, 0))
+        for interface in self.interfaces:
+            (ifname, mac, ip, netmask, broadcast) = self.getInterface(interface)
 
-                    self.transmitters.append({
-                        'relay': {'addr': addr, 'port': port},
-                        'interface': ifname,
-                        'addr': ip,
-                        'mac': mac,
-                        'netmask': netmask,
-                        'broadcast': broadcast,
-                        'socket': tx,
-                        'service': service
-                    })
-
-        elif self.isBroadcast(addr):
-            # For broadcast, similar handling
-            for interface in self.interfaces:
-                (ifname, mac, ip, netmask, broadcast) = self.getInterface(interface)
+            # Add this interface to the receiving socket's list.
+            if self.isBroadcast(addr):
                 rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
                 rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 rx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+                if 'SO_BINDTODEVICE' not in dir(socket):
+                    socket.SO_BINDTODEVICE = 25
+
                 rx.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, ifname.encode('utf-8'))
+
                 rx.bind(('0.0.0.0', port))
+
                 self.receivers.append(rx)
-                self.receiverInterfaces[rx] = ifname  # Associate the receiver with the interface
+                self.bindings.add((broadcast, port))
+                listenIP = '255.255.255.255'
 
-                if interface not in self.noTransmitInterfaces:
-                    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-                    tx.bind((ifname, 0))
+            elif self.isMulticast(addr):
+                packedAddress = struct.pack('4s4s', socket.inet_aton(addr), socket.inet_aton(ip))
+                rx.setsockopt(socket.SOL_IP, socket.IP_ADD_MEMBERSHIP, packedAddress)
+                listenIP = addr
+            else:
+                listenIP = addr
 
-                    self.transmitters.append({
-                        'relay': {'addr': broadcast, 'port': port},
-                        'interface': ifname,
-                        'addr': ip,
-                        'mac': mac,
-                        'netmask': netmask,
-                        'broadcast': broadcast,
-                        'socket': tx,
-                        'service': service
-                    })
+            # Generate a transmitter socket. Each interface
+            # requires its own transmitting socket.
+            if interface not in self.noTransmitInterfaces:
+                tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+                tx.bind((ifname, 0))
 
-        else:
-            # Unicast handling
-            for interface in self.interfaces:
-                (ifname, mac, ip, netmask, broadcast) = self.getInterface(interface)
+                self.transmitters.append({'relay': {'addr': listenIP, 'port': port}, 'interface': ifname, 'addr': ip, 'mac': mac, 'netmask': netmask, 'broadcast': broadcast, 'socket': tx, 'service': service})
 
-                # Create a receiver socket per interface
-                rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-                rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                rx.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, ifname.encode('utf-8'))
-                rx.bind((addr, port))
-                self.receivers.append(rx)
-                self.receiverInterfaces[rx] = ifname  # Associate the receiver with the interface
-
-                if interface not in self.noTransmitInterfaces:
-                    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-                    tx.bind((ifname, 0))
-
-                    self.transmitters.append({
-                        'relay': {'addr': addr, 'port': port},
-                        'interface': ifname,
-                        'addr': ip,
-                        'mac': mac,
-                        'netmask': netmask,
-                        'broadcast': broadcast,
-                        'socket': tx,
-                        'service': service
-                    })
-
+        if self.isMulticast(addr):
+            rx.bind((addr, port))
+            self.receivers.append(rx)
         self.bindings.add((addr, port))
-
 
     @staticmethod
     def unicastIpToMac(ip, procNetArp=None):
@@ -400,15 +355,17 @@ class PacketRelay():
         # Format:
         # IP address       HW type     Flags       HW address            Mask     Device
         # 192.168.0.1      0x1         0x2         18:90:22:bf:3c:23     *        wlp2s0
-        matches = re.findall(r'(\d{1,3}(?:\.\d{1,3}){3})\s.*?\s(([a-fA-F\d]{1,2}:){5}[a-fA-F\d]{1,2})', arpTable)
+        matches = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s.*\s(([a-fA-F\d]{1,2}\:){5}[a-fA-F\d]{1,2})', arpTable)
 
-        # Create a dictionary:
+        # We end up with tuples of 3 groups: (ip, mac, one_of_the_mac_sub_group)
+        # We remove the 3rd one which allows us to create a dictionary:
         ip2mac = dict([t[0:2] for t in matches])
 
         # Default to None if key not in dict
         return ip2mac.get(ip, None)
 
-    def modifyUdpPacket(self, data, ipHeaderLength, srcAddr=None, srcPort=None, dstAddr=None, dstPort=None):
+    @staticmethod
+    def modifyUdpPacket(data, ipHeaderLength, srcAddr=None, srcPort=None, dstAddr=None, dstPort=None):
         srcAddr = srcAddr if srcAddr else socket.inet_ntoa(data[12:16])
         dstAddr = dstAddr if dstAddr else socket.inet_ntoa(data[16:20])
 
@@ -416,18 +373,11 @@ class PacketRelay():
         dstPort = dstPort if dstPort else struct.unpack('!H', data[ipHeaderLength+2:ipHeaderLength+4])[0]
 
         # Recreate the packet
-        ipHeader = data[:12] + socket.inet_aton(srcAddr) + socket.inet_aton(dstAddr) + data[20:ipHeaderLength]
+        ipHeader = data[:ipHeaderLength-8] + socket.inet_aton(srcAddr) + socket.inet_aton(dstAddr)
 
         udpData = data[ipHeaderLength+8:]
         udpLength = 8 + len(udpData)
         udpHeader = struct.pack('!4H', srcPort, dstPort, udpLength, 0)
-
-        # Recalculate IP total length
-        totalLength = ipHeaderLength + len(udpHeader) + len(udpData)
-        ipHeader = ipHeader[:2] + struct.pack('!H', totalLength) + ipHeader[4:]
-
-        # Recalculate IP checksum
-        ipHeader = self.computeIPChecksum(ipHeader + udpHeader + udpData, ipHeaderLength)[:ipHeaderLength]
 
         return ipHeader + udpHeader + udpData
 
@@ -440,9 +390,23 @@ class PacketRelay():
         if flags & 0x8000 != 0:
             return data
 
-        # Set the unicast response bit
-        flags |= 0x8000
-        udpData = udpData[:2] + struct.pack('!H', flags) + udpData[4:]
+        queries = struct.unpack('!H', udpData[4:6])[0]
+
+        queryCount = 0
+        ptr = 12
+        while True:
+            labelLength = struct.unpack('B', udpData[ptr:ptr+1])[0]
+            if not labelLength & 0x3f:
+                if labelLength & 0xc0:
+                    ptr += 1
+                queryCount += 1
+                data = struct.unpack('!H', udpData[ptr+3:ptr+5])[0]
+                udpData = udpData[:ptr+3] + struct.pack('!H', data | 0x8000) + udpData[ptr+5:]
+                if queryCount == queries:
+                    break
+                ptr += 5
+            else:
+                ptr += labelLength+1
 
         return headers + udpData
 
@@ -456,24 +420,22 @@ class PacketRelay():
             checksum += struct.unpack('!H', data[i:i+2])[0]
 
         while checksum > 0xffff:
-            checksum = (checksum & 0xffff) + (checksum >> 16)
+            checksum = (checksum & 0xffff) + ((checksum - (checksum & 0xffff)) >> 16)
 
         checksum = ~checksum & 0xffff
-        data = data[:10] + struct.pack('!H', checksum) + data[12:]
-
         self.recentChecksums.append(checksum)
         if len(self.recentChecksums) > 256:
             self.recentChecksums = self.recentChecksums[1:]
 
-        return data
+        return data[:10] + struct.pack('!H', checksum) + data[12:]
 
     @staticmethod
     def computeUDPChecksum(ipHeader, udpHeader, data):
-        pseudoIPHeader = ipHeader[12:20]+struct.pack('!BBH', 0, ipHeader[9], len(udpHeader)+len(data))
+        pseudoIPHeader = ipHeader[12:20]+struct.pack('x')+ipHeader[9:10]+udpHeader[4:6]
 
-        udpPacket = pseudoIPHeader+udpHeader[:6]+struct.pack('!H', 0)+data
+        udpPacket = pseudoIPHeader+udpHeader[:6]+struct.pack('xx')+data
         if len(udpPacket) % 2:
-            udpPacket += struct.pack('!B', 0)
+            udpPacket += struct.pack('x')
 
         # Recompute the UDP header checksum
         checksum = 0
@@ -481,7 +443,7 @@ class PacketRelay():
             checksum += struct.unpack('!H', udpPacket[i:i+2])[0]
 
         while checksum > 0xffff:
-            checksum = (checksum & 0xffff) + (checksum >> 16)
+            checksum = (checksum & 0xffff) + ((checksum - (checksum & 0xffff)) >> 16)
 
         checksum = ~checksum & 0xffff
         return udpHeader[:6]+struct.pack('!H', checksum)
@@ -491,9 +453,7 @@ class PacketRelay():
         udpHeader = ipPacket[ipHeaderLength:ipHeaderLength+8]
         data      = ipPacket[ipHeaderLength+8:]
         dontFragment = ipPacket[6]
-        if isinstance(dontFragment, int):
-            dontFragment = dontFragment
-        else:
+        if type(dontFragment) == str:
             dontFragment = ord(dontFragment)
         dontFragment = (dontFragment & 0x40) >> 6
 
@@ -511,16 +471,16 @@ class PacketRelay():
                 flagsOffset |= 0x4000
 
             ipHeader = ipHeader[:2]+struct.pack('!H', totalLength)+ipHeader[4:6]+struct.pack('!H', flagsOffset)+ipHeader[8:]
-            ipPacketFragment = self.computeIPChecksum(ipHeader + udpHeader + dataFragment, ipHeaderLength)
+            ipPacket = self.computeIPChecksum(ipHeader + udpHeader + dataFragment, ipHeaderLength)
 
             try:
                 if srcMac != binascii.unhexlify('00:00:00:00:00:00'.replace(':', '')):
-                    etherPacket = destMac + srcMac + self.etherType + ipPacketFragment
+                    etherPacket = destMac + srcMac + self.etherType + ipPacket
                     sock.send(etherPacket)
                 else:
-                    sock.send(ipPacketFragment)
+                    sock.send(ipPacket)
             except Exception as e:
-                if hasattr(e, 'errno') and e.errno == errno.ENXIO:
+                if e.errno == errno.ENXIO:
                     raise
                 else:
                     self.logger.info('Error sending packet: %s' % str(e))
@@ -528,60 +488,12 @@ class PacketRelay():
     def match(self, addr, port):
         return ((addr, port)) in self.bindings
 
-    def getReceivingInterface(self, sock):
-        return self.receiverInterfaces.get(sock, 'unknown')
-
-    def isMDNSQuery(self, data, ipHeaderLength):
-        # mDNS uses UDP port 5353
-        udpHeader = data[ipHeaderLength:ipHeaderLength+8]
-        dstPort = struct.unpack('!H', udpHeader[2:4])[0]
-
-        if dstPort != self.MDNS_MCAST_PORT:
-            return False  # Not mDNS packet
-
-        dnsHeader = data[ipHeaderLength+8:ipHeaderLength+20]  # DNS header is 12 bytes
-        flags = struct.unpack('!H', dnsHeader[2:4])[0]
-        qr = (flags >> 15) & 0x1  # QR bit is the highest bit
-
-        return qr == 0  # Return True if it's a query
-
-    def isMDNSAdvertisement(self, data, ipHeaderLength):
-        # mDNS uses UDP port 5353
-        udpHeader = data[ipHeaderLength:ipHeaderLength+8]
-        dstPort = struct.unpack('!H', udpHeader[2:4])[0]
-
-        if dstPort != self.MDNS_MCAST_PORT:
-            return False  # Not mDNS packet
-
-        dnsHeader = data[ipHeaderLength+8:ipHeaderLength+20]  # DNS header is 12 bytes
-        flags = struct.unpack('!H', dnsHeader[2:4])[0]
-        qr = (flags >> 15) & 0x1  # QR bit is the highest bit
-
-        return qr == 1  # Return True if it's an advertisement (response)
-
-    def isSSDPQuery(self, data, ipHeaderLength):
-        # SSDP uses UDP port 1900
-        udpHeader = data[ipHeaderLength:ipHeaderLength+8]
-        dstPort = struct.unpack('!H', udpHeader[2:4])[0]
-
-        if dstPort != self.SSDP_MCAST_PORT:
-            return False  # Not SSDP packet
-
-        # SSDP messages are text-based HTTP-like messages
-        udpData = data[ipHeaderLength+8:]
-        # Decode data to string for easier searching
-        try:
-            udpDataStr = udpData.decode('utf-8', errors='ignore').upper()
-        except UnicodeDecodeError:
-            return False  # Not valid UTF-8, unlikely to be SSDP
-
-        # Check for M-SEARCH method
-        return 'M-SEARCH' in udpDataStr
-
     def loop(self):
         # Record where the most recent SSDP searches came from, to relay unicast answers
-        # Modified to store multiple recent SSDP search sources with timestamps
-        recentSsdpSearchSrc = []
+        # Note: ideally we'd be more clever and record multiple, but in practice
+        #   recording the last one seems to be enough for a 'normal' home SSDP traffic
+        #   (devices tend to retry SSDP queries multiple times anyway)
+        recentSsdpSearchSrc = {}
         while True:
             if self.remoteAddrs:
                 self.connectRemotes()
@@ -639,236 +551,190 @@ class PacketRelay():
                         if magic != self.MAGIC:
                             self.logger.info('REMOTE: Garbage data received, closing connection.')
                             s.close()
-                            self.removeConnection(s)
+                            self.remoteConnection(s)
                             continue
 
                     else:
+                        receivingInterface = 'local'
                         (data, addr) = s.recvfrom(10240)
                         addr = addr[0]
-                        receivingInterface = self.getReceivingInterface(s)
 
-                    eighthDataByte = data[8]
-                    if sys.version_info > (3, 0):
-                        eighthDataByte = bytes([data[8]])
-                    ttl = struct.unpack('B', eighthDataByte)[0]
+                eighthDataByte = data[8]
+                if sys.version_info > (3, 0):
+                    eighthDataByte = bytes([data[8]])
+                ttl = struct.unpack('B', eighthDataByte)[0]
 
-                    if self.ttl:
-                        data = data[:8] + struct.pack('B', self.ttl) + data[9:]
+                if self.ttl:
+                    data = data[:8] + struct.pack('B', self.ttl) + data[9:]
 
-                    # Use IP checksum information to see if we have already seen this
-                    # packet, since once we have retransmitted it on an interface
-                    # we know that we will see it once again on that interface.
-                    ipChecksum = struct.unpack('!H', data[10:12])[0]
-                    if ipChecksum in self.recentChecksums:
-                        continue
+                # Use IP checksum information to see if we have already seen this
+                # packet, since once we have retransmitted it on an interface
+                # we know that we will see it once again on that interface.
+                #
+                # If we were retransmitting via a UDP socket then we could
+                # just disable IP_MULTICAST_LOOP but that won't work as we are
+                # using an RAW socket.
+                ipChecksum = struct.unpack('!H', data[10:12])[0]
+                if ipChecksum in self.recentChecksums:
+                    continue
 
-                    srcAddr = socket.inet_ntoa(data[12:16])
-                    dstAddr = socket.inet_ntoa(data[16:20])
+                srcAddr = socket.inet_ntoa(data[12:16])
+                dstAddr = socket.inet_ntoa(data[16:20])
 
-                    # Compute the length of the IP header
-                    firstDataByte = data[0]
-                    if sys.version_info > (3, 0):
-                        firstDataByte = bytes([data[0]])
-                    ipHeaderLength = (struct.unpack('B', firstDataByte)[0] & 0x0f) * 4
-                    srcPort = struct.unpack('!H', data[ipHeaderLength+0:ipHeaderLength+2])[0]
-                    dstPort = struct.unpack('!H', data[ipHeaderLength+2:ipHeaderLength+4])[0]
+                # Compute the length of the IP header so that we can then move past
+                # it and delve into the UDP packet to find out what destination port
+                # this packet was sent to. The length is encoded in the first least
+                # significant nybble of the IP packet and is specified in nybbles.
+                firstDataByte = data[0]
+                if sys.version_info > (3, 0):
+                    firstDataByte = bytes([data[0]])
+                ipHeaderLength = (struct.unpack('B', firstDataByte)[0] & 0x0f) * 4
+                srcPort = struct.unpack('!H', data[ipHeaderLength+0:ipHeaderLength+2])[0]
+                dstPort = struct.unpack('!H', data[ipHeaderLength+2:ipHeaderLength+4])[0]
 
-                    # Raw sockets cannot be bound to a specific port, so we receive all UDP packets with matching dstAddr
-                    if receivingInterface != 'remote' and not self.match(dstAddr, dstPort):
-                        continue
+                # raw sockets cannot be bound to a specific port, so we receive all UDP packets with matching dstAddr
+                if receivingInterface == 'local' and not self.match(dstAddr, dstPort):
+                    continue
 
-                    if self.remoteSockets() and not (receivingInterface == 'remote' and self.noRemoteRelay) and srcAddr != self.ssdpUnicastAddr:
-                        packet = self.aes.encrypt(self.MAGIC + socket.inet_aton(addr) + data)
-                        for remoteConnection in self.remoteSockets():
-                            if remoteConnection == s:
-                                continue
-                            try:
-                                remoteConnection.sendall(struct.pack('!H', len(packet)) + packet)
-
-                                for remote in self.remoteAddrs:
-                                    if remote['socket'] == remoteConnection and remote['connecting']:
-                                        self.logger.info('REMOTE: Connection to %s established' % remote['addr'])
-                                        remote['connecting'] = False
-                            except socket.error as e:
-                                if e.errno == errno.EAGAIN:
-                                    pass
-                                else:
-                                    self.logger.info('REMOTE: Failed to connect to %s: %s' % (remote['addr'], str(e)))
-                                    self.removeConnection(remoteConnection)
-                                    continue
-
-                    origSrcAddr = srcAddr
-                    origSrcPort = srcPort
-                    origDstAddr = dstAddr
-                    origDstPort = dstPort
-
-                    destMac = None
-                    modifiedData = None
-
-                    if self.mdnsForceUnicast and dstAddr == PacketRelay.MDNS_MCAST_ADDR and dstPort == PacketRelay.MDNS_MCAST_PORT:
-                        data = PacketRelay.mdnsSetUnicastBit(data, ipHeaderLength)
-
-                    # Handle SSDP M-SEARCH requests
-                    if self.ssdpUnicastAddr and dstAddr == PacketRelay.SSDP_MCAST_ADDR and dstPort == PacketRelay.SSDP_MCAST_PORT and b'M-SEARCH' in data[ipHeaderLength+8:].upper():
-                        # Append the source to recentSsdpSearchSrc
-                        recentSsdpSearchSrc.append({'addr': srcAddr, 'port': srcPort, 'timestamp': time.time()})
-                        # Remove entries older than 5 seconds
-                        recentSsdpSearchSrc = [entry for entry in recentSsdpSearchSrc if time.time() - entry['timestamp'] < 5]
-                        self.logger.info('Recorded SSDP search source: %s:%d' % (srcAddr, srcPort))
-
-                        # Modify the src IP and port
-                        srcAddr = self.ssdpUnicastAddr
-                        srcPort = PacketRelay.SSDP_UNICAST_PORT
-                        data = self.modifyUdpPacket(data, ipHeaderLength, srcAddr=srcAddr, srcPort=srcPort)
-
-                    elif self.ssdpUnicastAddr and origDstAddr == self.ssdpUnicastAddr and origDstPort == PacketRelay.SSDP_UNICAST_PORT:
-                        # Remove entries older than 5 seconds
-                        recentSsdpSearchSrc = [entry for entry in recentSsdpSearchSrc if time.time() - entry['timestamp'] < 5]
-                        if not recentSsdpSearchSrc:
-                            # No recent SSDP searches
+                if self.remoteSockets() and not (receivingInterface == 'remote' and self.noRemoteRelay) and srcAddr != self.ssdpUnicastAddr:
+                    packet = self.aes.encrypt(self.MAGIC + socket.inet_aton(addr) + data)
+                    for remoteConnection in self.remoteSockets():
+                        if remoteConnection == s:
                             continue
+                        try:
+                            remoteConnection.sendall(struct.pack('!H', len(packet)) + packet)
 
-                        # Relay the SSDP unicast response to all recent sources
-                        for entry in recentSsdpSearchSrc:
-                            dstAddr = entry['addr']
-                            dstPort = entry['port']
-                            self.logger.info('Relaying SSDP Unicast response to %s:%d' % (dstAddr, dstPort))
-                            data_modified = self.modifyUdpPacket(data, ipHeaderLength, dstAddr=dstAddr, dstPort=dstPort)
-
-                            # Resolve destMac for dstAddr
-                            try:
-                                if dstAddr in self.ip_mac_map:
-                                    # Destination is router's own IP address
-                                    destMac = self.ip_mac_map[dstAddr]
-                                else:
-                                    destMacAddr = PacketRelay.unicastIpToMac(dstAddr)
-                                    if destMacAddr:
-                                        destMac = binascii.unhexlify(destMacAddr.replace(':', ''))
-                                    else:
-                                        self.logger.info('DEBUG: could not resolve mac for %s' % dstAddr)
-                                        continue
-                            except Exception as e:
-                                self.logger.info('DEBUG: exception while resolving mac of IP %s: %s' % (dstAddr, str(e)))
+                            for remote in self.remoteAddrs:
+                                if remote['socket'] == remoteConnection and remote['connecting']:
+                                    self.logger.info('REMOTE: Connection to %s established' % remote['addr'])
+                                    remote['connecting'] = False
+                        except socket.error as e:
+                            if e.errno == errno.EAGAIN:
+                                pass
+                            else:
+                                self.logger.info('REMOTE: Failed to connect to %s: %s' % (self.remoteAddr, str(e)))
+                                self.removeConnection(remoteConnection)
                                 continue
 
-                            # Determine the appropriate transmitter (interface) to send the packet on
-                            tx_found = False
-                            for tx in self.transmitters:
-                                if self.onNetwork(dstAddr, tx['addr'], tx['netmask']):
-                                    # Found the transmitter corresponding to the network
-                                    tx_found = True
-                                    break
-                            if not tx_found:
-                                self.logger.info('DEBUG: could not find transmitter for dstAddr %s' % dstAddr)
-                                continue
+                origSrcAddr = srcAddr
+                origSrcPort = srcPort
+                origDstAddr = dstAddr
+                origDstPort = dstPort
 
-                            # Transmit the packet
-                            try:
-                                self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data_modified)
-                                self.logger.info('[SSDP Unicast] Relayed %s bytes from %s:%s on %s [ttl %s] to %s:%s via %s/%s' %
-                                                 (len(data_modified), origSrcAddr, origSrcPort, receivingInterface, ttl, dstAddr, dstPort, tx['interface'], tx['addr']))
-                            except Exception as e:
-                                if hasattr(e, 'errno') and e.errno == errno.ENXIO:
-                                    try:
-                                        (ifname, mac, ip, netmask, broadcast) = self.getInterface(tx['interface'])
-                                        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-                                        s.bind((ifname, 0))
-                                        tx['mac'] = mac
-                                        tx['netmask'] = netmask
-                                        tx['addr'] = ip
-                                        tx['socket'] = s
-                                        self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data_modified)
-                                    except Exception as e:
-                                        self.logger.info('Error sending packet: %s' % str(e))
-                                else:
-                                    self.logger.info('Error sending packet: %s' % str(e))
-                                continue  # Skip to next entry in recentSsdpSearchSrc
+                # Record who sent the request
+                # FIXME: record more than one?
+                destMac = None
+                modifiedData = None
 
-                        # Skip the rest of the loop for this packet
+                if self.mdnsForceUnicast and dstAddr == PacketRelay.MDNS_MCAST_ADDR and dstPort == PacketRelay.MDNS_MCAST_PORT:
+                    data = PacketRelay.mdnsSetUnicastBit(data, ipHeaderLength)
+
+                if self.ssdpUnicastAddr and dstAddr == PacketRelay.SSDP_MCAST_ADDR and dstPort == PacketRelay.SSDP_MCAST_PORT and (re.search(b'M-SEARCH', data) or re.search(b'NOTIFY', data)):
+                    recentSsdpSearchSrc = {'addr': srcAddr, 'port': srcPort}
+                    self.logger.info('Last SSDP search source: %s:%d' % (srcAddr, srcPort))
+
+                    # Modify the src IP and port to make it look like it comes from us
+                    # so as we receive the unicast answers to a well known port (1901)
+                    # and can relay them
+                    srcAddr = self.ssdpUnicastAddr
+                    srcPort = PacketRelay.SSDP_UNICAST_PORT
+                    data = PacketRelay.modifyUdpPacket(data, ipHeaderLength, srcAddr=srcAddr, srcPort=srcPort)
+
+                elif self.ssdpUnicastAddr and origDstAddr == self.ssdpUnicastAddr and origDstPort == PacketRelay.SSDP_UNICAST_PORT:
+                    if not recentSsdpSearchSrc:
+                        # We haven't seen a SSDP multicast request yet
                         continue
 
-                    # Determine if the packet is a query from an interface we should not relay queries from
-                    is_mdns_query = self.isMDNSQuery(data, ipHeaderLength)
-                    is_ssdp_query = self.isSSDPQuery(data, ipHeaderLength)
+                    # Relay the SSDP unicast answer back to the most recent source.
+                    # On a network that has heavy SSDP usage, this probably won't
+                    # really work as designed: if the unicast reply comes after
+                    # another SSDP multicast packet comes in from a different srcAddr
+                    # then the reply goes back to the wrong host.
+                    dstAddr = recentSsdpSearchSrc['addr']
+                    dstPort = recentSsdpSearchSrc['port']
+                    self.logger.info('Received SSDP Unicast - received from %s:%d on %s:%d, need to relay to %s:%d' % (origSrcAddr, origSrcPort, origDstAddr, origDstPort, dstAddr, dstPort))
+                    data = PacketRelay.modifyUdpPacket(data, ipHeaderLength, dstAddr=dstAddr, dstPort=dstPort)
 
-                    if (is_mdns_query or is_ssdp_query) and receivingInterface in self.noQueryInterfaces:
-                        self.logger.info('Dropping query packet from interface %s' % receivingInterface)
+                    try:
+                        destMac = binascii.unhexlify(PacketRelay.unicastIpToMac(dstAddr).replace(':', ''))
+                    except Exception as e:
+                        self.logger.info('DEBUG: exception while resolving mac of IP %s: %s' % (dstAddr, str(e)))
                         continue
 
-                    # Work out the name of the interface we received the packet on.
-                    broadcastPacket = False
-                    if receivingInterface != 'remote':
-                        pass  # receivingInterface already determined
+                    # It's possible (though unlikely) we can't resolve the MAC if it's unicast.
+                    # In that case, we can't relay the packet.
+                    if not destMac:
+                        self.logger.info('DEBUG: could not resolve mac for %s' % dstAddr)
+                        continue
 
+                # Work out the name of the interface we received the packet on.
+                broadcastPacket = False
+                if receivingInterface == 'local':
                     for tx in self.transmitters:
-                        # Re-transmit on all other interfaces than on the interface that we received this packet from...
-                        if receivingInterface == tx['interface']:
-                            continue
+                        if (origDstAddr == tx['relay']['addr'] or origDstAddr == tx.get('broadcast')) and origDstPort == tx['relay']['port'] \
+                                and self.onNetwork(addr, tx['addr'], tx['netmask']):
+                            receivingInterface = tx['interface']
+                            broadcastPacket = (origDstAddr == tx['broadcast'])
 
-                        # Check if the packet is an mDNS advertisement and should not be relayed to this interface
-                        if self.isMDNSAdvertisement(data, ipHeaderLength) and tx['interface'] in self.noAdvertiseInterfaces:
-                            self.logger.info('Skipping mDNS advertisement relay to interface %s' % tx['interface'])
-                            continue
+                for tx in self.transmitters:
+                    # Re-transmit on all other interfaces than on the interface that we received this packet from...
+                    if receivingInterface == tx['interface']:
+                        continue
 
-                        transmit = True
-                        for net in self.ifFilter:
-                            (network, netmask) = '/' in net and net.split('/') or (net, '32')
-                            if self.onNetwork(srcAddr, network, self.cidrToNetmask(int(netmask))) and tx['interface'] not in self.ifFilter[net]:
-                                transmit = False
-                                break
-                        if not transmit:
-                            continue
+                    transmit = True
+                    for net in self.ifFilter:
+                        (network, netmask) = '/' in net and net.split('/') or (net, '32')
+                        if self.onNetwork(srcAddr, network, self.cidrToNetmask(int(netmask))) and tx['interface'] not in self.ifFilter[net]:
+                            transmit = False
+                            break
+                    if not transmit:
+                        continue
 
-                        if srcAddr == self.ssdpUnicastAddr and not self.onNetwork(srcAddr, tx['addr'], tx['netmask']):
-                            continue
+                    if srcAddr == self.ssdpUnicastAddr and not self.onNetwork(srcAddr, tx['addr'], tx['netmask']):
+                        continue
 
-                        if broadcastPacket:
-                            dstAddr = tx['broadcast']
-                            destMac = self.etherAddrs[PacketRelay.BROADCAST]
-                            origDstAddr = tx['broadcast']
-                            data = data[:16] + socket.inet_aton(tx['broadcast']) + data[20:]
+                    if broadcastPacket:
+                        dstAddr = tx['broadcast']
+                        destMac = self.etherAddrs[PacketRelay.BROADCAST]
+                        origDstAddr = tx['broadcast']
+                        data = data[:16] + socket.inet_aton(tx['broadcast']) + data[20:]
 
-                        if (origDstAddr == tx['relay']['addr'] or origDstAddr == tx.get('broadcast')) and origDstPort == tx['relay']['port'] and (self.oneInterface or not self.onNetwork(addr, tx['addr'], tx['netmask'])):
-                            destMac = destMac if destMac else self.etherAddrs.get(dstAddr, None)
+                    if (origDstAddr == tx['relay']['addr'] or origDstAddr == tx.get('broadcast')) and origDstPort == tx['relay']['port'] and (self.oneInterface or not self.onNetwork(addr, tx['addr'], tx['netmask'])):
+                        destMac = destMac if destMac else self.etherAddrs[dstAddr]
 
-                            if tx['interface'] in self.masquerade:
-                                data = data[:12] + socket.inet_aton(tx['addr']) + data[16:]
-                                srcAddr = tx['addr']
-                            asSrc = '' if srcAddr == origSrcAddr and srcPort == origSrcPort else ' (as %s:%s)' % (srcAddr, srcPort)
-                            self.logger.info('%s%s %s byte%s from %s:%s on %s [ttl %s] to %s:%s via %s/%s%s' % (tx['service'] and '[%s] ' % tx['service'] or '',
-                                                                                                                tx['interface'] in self.masquerade and 'Masqueraded' or 'Relayed',
+                        if tx['interface'] in self.masquerade:
+                            data = data[:12] + socket.inet_aton(tx['addr']) + data[16:]
+                            srcAddr = tx['addr']
+                        asSrc = '' if srcAddr == origSrcAddr and srcPort == origSrcPort else ' (as %s:%s)' % (srcAddr, srcPort)
+                        self.logger.info('%s%s %s byte%s from %s:%s on %s [ttl %s] to %s:%s via %s/%s%s' % (tx['service'] and '[%s] ' % tx['service'] or '',
+                                                                                                          tx['interface'] in self.masquerade and 'Masqueraded' or 'Relayed',
+                                                                                                          len(data),
+                                                                                                          len(data) != 1 and 's' or '',
+                                                                                                          origSrcAddr,
+                                                                                                          origSrcPort,
+                                                                                                          receivingInterface,
+                                                                                                          ttl,
+                                                                                                          dstAddr,
+                                                                                                          dstPort,
+                                                                                                          tx['interface'],
+                                                                                                          tx['addr'],
+                                                                                                          asSrc))
 
-                                                                                                                len(data),
-                                                                                                                len(data) != 1 and 's' or '',
-                                                                                                                origSrcAddr,
-                                                                                                                origSrcPort,
-                                                                                                                receivingInterface,
-                                                                                                                ttl,
-                                                                                                                dstAddr,
-                                                                                                                dstPort,
-                                                                                                                tx['interface'],
-                                                                                                                tx['addr'],
-                                                                                                                asSrc))
-
-                            try:
-                                self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data)
-                            except Exception as e:
-                                if hasattr(e, 'errno') and e.errno == errno.ENXIO:
-                                    try:
-                                        (ifname, mac, ip, netmask, broadcast) = self.getInterface(tx['interface'])
-                                        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-                                        s.bind((ifname, 0))
-                                        tx['mac'] = mac
-                                        tx['netmask'] = netmask
-                                        tx['addr'] = ip
-                                        tx['socket'] = s
-                                        self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data)
-                                    except Exception as e:
-                                        self.logger.info('Error sending packet: %s' % str(e))
-                                else:
+                        try:
+                            self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data)
+                        except Exception as e:
+                            if e.errno == errno.ENXIO:
+                                try:
+                                    (ifname, mac, ip, netmask, broadcast) = self.getInterface(tx['interface'])
+                                    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+                                    s.bind((ifname, 0))
+                                    tx['mac'] = mac
+                                    tx['netmask'] = netmask
+                                    tx['addr'] = ip
+                                    tx['socket'] = s
+                                    self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, data)
+                                except Exception as e:
                                     self.logger.info('Error sending packet: %s' % str(e))
-                                continue  # Skip to next transmitter
-
 
     def getInterface(self, interface):
         ifname = None
@@ -882,7 +748,7 @@ class PacketRelay():
             for i in self.nif.interfaces():
                 addrs = self.nif.ifaddresses(i)
                 if self.nif.AF_INET in addrs:
-                    if interface == addrs[self.nif.AF_INET][0]['addr']:
+                    if self.nif.AF_INET in addrs and interface == addrs[self.nif.AF_INET][0]['addr']:
                         ifname = i
                         break
 
@@ -894,10 +760,11 @@ class PacketRelay():
             for i in self.nif.interfaces():
                 addrs = self.nif.ifaddresses(i)
                 if self.nif.AF_INET in addrs:
-                    ip = addrs[self.nif.AF_INET][0]['addr']
-                    if self.onNetwork(ip, network, netmask):
-                        ifname = i
-                        break
+                    if self.nif.AF_INET in addrs:
+                        ip = addrs[self.nif.AF_INET][0]['addr']
+                        if self.onNetwork(ip, network, netmask):
+                            ifname = i
+                            break
 
         if not ifname:
             raise IOError('Interface %s does not exist.' % interface)
@@ -931,8 +798,8 @@ class PacketRelay():
             # netifaces might not be able to detect its MAC address so
             # lets at least try the parent interface and see if we can
             # find a MAC address there.
-            if self.nif.AF_LINK not in addrs and ':' in ifname:
-                addrs = self.nif.ifaddresses(ifname.split(':')[0])
+            if self.nif.AF_LINK not in addrs and ifname.find(':') != -1:
+                addrs = self.nif.ifaddresses(ifname[:ifname.find(':')])
 
             if self.nif.AF_LINK in addrs:
                 mac = addrs[self.nif.AF_LINK][0]['addr']
@@ -1025,8 +892,6 @@ def main():
                         help='Relay between these interfaces (minimum 2).')
     parser.add_argument('--noTransmitInterfaces', nargs='+',
                         help='Do not relay packets via these interfaces, listen only.')
-    parser.add_argument('--noQueryInterfaces', nargs='+',
-                        help='Interfaces from which queries (mDNS and SSDP) should not be relayed.')
     parser.add_argument('--ifFilter',
                         help='JSON file specifying which interface(s) a particular source IP can relay to.')
     parser.add_argument('--ssdpUnicastAddr',
@@ -1045,9 +910,14 @@ def main():
     parser.add_argument('--noSonosDiscovery', action='store_true',
                         help='Do not relay broadcast Sonos discovery packets.')
     parser.add_argument('--homebrewNetifaces', action='store_true',
-                        help='Use self-contained netifaces-like package.')
-    parser.add_argument('--ifNameStructLen', type=int, default=40,
-                        help='Help the self-contained netifaces work out its ifName struct length.')
+                        help='No longer has any effect: the self-contained, dependency-free '
+                             'interface lookup is now always used (netifaces is no longer '
+                             'required, or available as an OpenWrt package). Kept only so that '
+                             'existing init scripts which pass this flag keep working.')
+    parser.add_argument('--ifNameStructLen', type=int, default=None,
+                        help='Override the auto-detected ifName struct length (32 on 32-bit '
+                             'systems, 40 on 64-bit) used to parse SIOCGIFCONF results. Only '
+                             'needed if auto-detection guesses wrong for your target.')
     parser.add_argument('--allowNonEther', action='store_true',
                         help='Allow non-ethernet interfaces to be configured.')
     parser.add_argument('--masquerade', nargs='+',
@@ -1076,9 +946,6 @@ def main():
                         help='Save logs to this file.')
     parser.add_argument('--verbose', action='store_true',
                         help='Enable verbose output.')
-    parser.add_argument('--noAdvertiseInterfaces', nargs='+',
-                        help='Interfaces to which mDNS advertisements should not be relayed.')
-
     args = parser.parse_args()
 
     if len(args.interfaces) < 2 and not args.oneInterface and not args.listen and not args.remote:
@@ -1124,7 +991,6 @@ def main():
                               waitForIP            = args.wait,
                               ttl                  = args.ttl,
                               oneInterface         = args.oneInterface,
-                              homebrewNetifaces    = args.homebrewNetifaces,
                               ifNameStructLen      = args.ifNameStructLen,
                               allowNonEther        = args.allowNonEther,
                               ssdpUnicastAddr      = args.ssdpUnicastAddr,
@@ -1136,9 +1002,7 @@ def main():
                               remoteRetry          = args.remoteRetry,
                               noRemoteRelay        = args.noRemoteRelay,
                               aes                  = args.aes,
-                              logger               = logger,
-                              noQueryInterfaces    = args.noQueryInterfaces,
-                              noAdvertiseInterfaces = args.noAdvertiseInterfaces)
+                              logger               = logger)
 
     for relay in relays:
         try:
