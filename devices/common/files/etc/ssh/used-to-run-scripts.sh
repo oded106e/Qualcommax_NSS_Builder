@@ -28,7 +28,7 @@ fi
 script3="/etc/ssh/multicast-relay.py"
 if [ -f "$script3" ]; then
     log "Running script 3 in the background..."
-python3 "$script3" --interfaces br-smarthome br-open br-lan --homebrewNetifaces --ttl 255 &
+python3 "$script3" --interfaces br-smarthome br-open br-lan --homebrewNetifaces --ttl 255 --ssdpUnicastAddr 192.168.0.1 &
 
 else
     log "Script 3 not found: $script3"
