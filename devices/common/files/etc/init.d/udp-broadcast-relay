@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+start() {
+    /usr/sbin/udp-broadcast-relay-redux --id 2 --port 1900 --dev br-lan --dev br-smarthome --multicast 239.255.255.250 -f >/dev/null 2>&1 &
+    /usr/sbin/udp-broadcast-relay-redux --id 1 --port 5353 --dev br-lan --dev br-smarthome --multicast 224.0.0.251 -f >/dev/null 2>&1 &
+}
+
+stop() {
+    killall udp-broadcast-relay-redux
+}
