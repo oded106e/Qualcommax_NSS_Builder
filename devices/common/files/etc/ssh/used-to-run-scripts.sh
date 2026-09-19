@@ -7,7 +7,7 @@ log() {
 }
 sleep 15
 # Script 1
-#script1="/etc/ssh/wan_wifi-Notify.sh"
+#script1=""
 if [ -f "$script1" ]; then
     log "Running script 1 in the background..."
     sh "$script1" &
@@ -25,10 +25,10 @@ else
 fi
 
 # Script 3
-script3="/etc/ssh/multicast-relay.py"
+#script3=""
 if [ -f "$script3" ]; then
     log "Running script 3 in the background..."
-python3 "$script3" --interfaces br-smarthome br-open br-lan --homebrewNetifaces --ttl 255 --ssdpRepeat 60 --mdnsRepeat 60 &
+python3 "$script3" 
 
 else
     log "Script 3 not found: $script3"
@@ -37,7 +37,7 @@ fi
 sleep 2
 
 # Script 4
-#script4="/etc/ssh/connection-status-watcher.sh"
+#script4=""
 if [ -f "$script4" ]; then
     log "Running script 4 in the background..."
     sh "$script4" &
