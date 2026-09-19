@@ -206,7 +206,7 @@ jobs:
 
 
       - name: Build UDP Relay and inject into OpenWrt files
-              run: |
+        run: |
                 set -euo pipefail      
                 # 1. התקנת הקומפיילר וקימפול
                 sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
