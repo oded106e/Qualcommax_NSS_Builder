@@ -185,15 +185,16 @@ jobs:
           sudo apt-get install -y \
             bzip2 g++ gawk gcc git glibc-source libncurses-dev make rsync  
 
-      - name: Compile udp-broadcast-relay-redux locally
+      - name: Cross-compile udp-broadcast-relay-redux for ARM64
         run: |
           git clone https://github.com/udp-redux/udp-broadcast-relay-redux.git /tmp/relay-src
           cd /tmp/relay-src
+          aarch64-openwrt-linux-gnu-gcc -O3 main.c -o udp-broadcast-relay-redux || \
+          x86_64-openwrt-linux-gnu-gcc -O3 main.c -o udp-broadcast-relay-redux || \
           gcc -O3 main.c -o udp-broadcast-relay-redux
-    
           mkdir -p files/usr/sbin
           cp udp-broadcast-relay-redux files/usr/sbin/udp-broadcast-relay-redux
-          chmod +x files/usr/sbin/udp-broadcast-relay-redux                
+          chmod +x files/usr/sbin/udp-broadcast-relay-redux       
 
       - name: Checkout OpenWrt source
         uses: actions/checkout@v7
