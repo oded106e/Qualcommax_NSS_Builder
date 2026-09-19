@@ -1,4 +1,5 @@
 #!/bin/sh
 chmod +x /etc/ssh/*.sh 2>/dev/null
 chmod +x /usr/sbin/udp-broadcast-relay-redux 2>/dev/null
+chmod +x /etc/init.d/udp-broadcast-relay 2>/dev/null
 exit 0
