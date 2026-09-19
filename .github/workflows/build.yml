@@ -183,7 +183,11 @@ jobs:
           # step that has to succeed.
           sudo apt-get update || true
           sudo apt-get install -y \
-            bzip2 g++ gawk gcc git glibc-source libncurses-dev make rsync
+            bzip2 g++ gawk gcc git glibc-source libncurses-dev make rsync  
+
+      - name: Clone udp broadcast-relay-redux locally
+        run: |
+          git clone https://github.com/udp-redux/udp-broadcast-relay-redux.git package/udp-broadcast-relay-redux                      
 
       - name: Checkout OpenWrt source
         uses: actions/checkout@v7
