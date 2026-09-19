@@ -185,16 +185,6 @@ jobs:
           sudo apt-get install -y \
             bzip2 g++ gawk gcc git glibc-source libncurses-dev make rsync  
 
-      - name: Install ARM64 cross-compiler and build
-        run: |
-          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          git clone https://github.com/udp-redux/udp-broadcast-relay-redux.git /tmp/relay-src
-          cd /tmp/relay-src
-          aarch64-linux-gnu-gcc -O3 main.c -o udp-broadcast-relay-redux
-          mkdir -p files/usr/sbin
-          cp udp-broadcast-relay-redux files/usr/sbin/udp-broadcast-relay-redux
-          chmod +x files/usr/sbin/udp-broadcast-relay-redux    
-
       - name: Checkout OpenWrt source
         uses: actions/checkout@v7
         with:
@@ -213,6 +203,40 @@ jobs:
           OPENWRT_DIR: ${{ github.workspace }}/openwrt
           BUILDER_REPO: ${{ github.workspace }}/builder
         run: bash builder/scripts/prepare-build.sh
+
+
+      - name: Build UDP Relay and inject into OpenWrt files
+              run: |
+                set -euo pipefail      
+                # 1. התקנת הקומפיילר וקימפול
+                sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+                git clone https://github.com/udp-redux/udp-broadcast-relay-redux.git /tmp/relay-src
+                cd /tmp/relay-src
+                aarch64-linux-gnu-gcc -O3 main.c -o udp-broadcast-relay-redux
+                FILES_DIR="${{ github.workspace }}/openwrt/files"
+                mkdir -p "$FILES_DIR/usr/sbin"
+                mkdir -p "$FILES_DIR/etc/init.d"
+                cp udp-broadcast-relay-redux "$FILES_DIR/usr/sbin/udp-broadcast-relay-redux"
+                chmod +x "$FILES_DIR/usr/sbin/udp-broadcast-relay-redux"       
+                cat << 'EOF' > "$FILES_DIR/etc/init.d/udp-broadcast-relay"
+                START=99
+                STOP=10
+                USE_PROCD=1
+                start_service() {
+                    procd_open_instance "mdns"
+                    procd_set_param command /usr/sbin/udp-broadcast-relay-redux --id 1 --port 5353 --dev br-lan --dev br-smarthome --multicast 224.0.0.251
+                    procd_set_param respawn
+                    procd_close_instance
+                    procd_open_instance "ssdp"
+                    procd_set_param command /usr/sbin/udp-broadcast-relay-redux --id 2 --port 1900 --dev br-lan --dev br-smarthome --multicast 239.255.255.250
+                    procd_set_param respawn
+                    procd_close_instance
+                }
+                EOF
+                chmod +x "$FILES_DIR/etc/init.d/udp-broadcast-relay"
+                echo "Verifying files in $FILES_DIR:"
+                ls -la "$FILES_DIR/usr/sbin/udp-broadcast-relay-redux"
+                ls -la "$FILES_DIR/etc/init.d/udp-broadcast-relay"        
 
       - name: Set reproducible-build env
         working-directory: openwrt
