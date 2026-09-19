@@ -177,7 +177,7 @@ class PacketRelay():
 
     def __init__(self, interfaces, noTransmitInterfaces, ifFilter, waitForIP, ttl,
                  oneInterface, ifNameStructLen, allowNonEther,
-                 ssdpUnicastAddr, mdnsForceUnicast, masquerade, listen, remote,
+                 ssdpUnicastAddr, ssdpRepeat, mdnsRepeat, mdnsForceUnicast, masquerade, listen, remote,
                  remotePort, remoteRetry, noRemoteRelay, aes, logger):
         self.interfaces = interfaces
         self.noTransmitInterfaces = noTransmitInterfaces or []
@@ -188,6 +188,29 @@ class PacketRelay():
         else:
             self.ifFilter = {}
         self.ssdpUnicastAddr = ssdpUnicastAddr
+        # Some SSDP-capable devices (several LG webOS TVs and some Fire TV /
+        # Alexa devices observed in the wild) reliably announce themselves via
+        # periodic NOTIFY (ssdp:alive) but never answer unicast M-SEARCH
+        # requests. Clients that rely on catching that NOTIFY tend to show the
+        # device flickering in and out as their own internal cache ages out
+        # between the device's own NOTIFY bursts (which can be 1-2 minutes
+        # apart). ssdpRepeat, if set, makes the relay itself remember the most
+        # recent 'alive' NOTIFY per device (keyed by USN) and re-transmit it
+        # to the other interfaces every ssdpRepeat seconds - independent of
+        # how often the device itself actually re-announces. A byebye and
+        # CACHE-CONTROL max-age are treated as reasons to re-check a device,
+        # rather than removing an otherwise reachable TV immediately: webOS
+        # is known to send transient byebyes while its discovery stack restarts.
+        self.ssdpRepeat = ssdpRepeat
+        self.notifyCache = {}
+        # Google Cast, Android TV Remote and AirPlay discovery use mDNS, not
+        # SSDP. Their useful A/SRV records commonly have a TTL of only 120
+        # seconds. A plain multicast reflector forwards the initial packet
+        # but then lets the remote network's cache expire. Keep complete mDNS
+        # service responses with an SRV endpoint and re-announce them while
+        # that endpoint remains reachable.
+        self.mdnsRepeat = mdnsRepeat
+        self.mdnsCache = {}
         self.mdnsForceUnicast = mdnsForceUnicast
         self.wait = waitForIP
         self.ttl = ttl
@@ -488,6 +511,387 @@ class PacketRelay():
     def match(self, addr, port):
         return ((addr, port)) in self.bindings
 
+    @staticmethod
+    def parseSsdpNotifyHeaders(data, ipHeaderLength):
+        # UDP payload starts 8 bytes past the end of the (variable-length) IP header
+        payload = data[ipHeaderLength+8:]
+        try:
+            text = payload.decode('utf-8', 'ignore')
+        except Exception:
+            return (None, None, None, None, None)
+
+        usn = re.search(r'^USN:\s*(.+?)\r?$', text, re.IGNORECASE | re.MULTILINE)
+        nts = re.search(r'^NTS:\s*(.+?)\r?$', text, re.IGNORECASE | re.MULTILINE)
+        maxAge = re.search(r'^CACHE-CONTROL:\s*.*max-age\s*=\s*(\d+)', text, re.IGNORECASE | re.MULTILINE)
+        location = re.search(r'^LOCATION:\s*https?://([^:/\s]+)(?::(\d+))?', text, re.IGNORECASE | re.MULTILINE)
+
+        usn = usn.group(1).strip() if usn else None
+        nts = nts.group(1).strip().lower() if nts else None
+        maxAge = int(maxAge.group(1)) if maxAge else 1800  # SSDP's own conventional default
+        checkHost = location.group(1) if location else None
+        checkPort = int(location.group(2)) if location and location.group(2) else (80 if checkHost else None)
+
+        return (usn, nts, maxAge, checkHost, checkPort)
+
+    def cacheSsdpNotify(self, data, addr, ttl, receivingInterface, ipHeaderLength):
+        (usn, nts, maxAge, checkHost, checkPort) = PacketRelay.parseSsdpNotifyHeaders(data, ipHeaderLength)
+        if not usn:
+            return
+
+        if nts == 'ssdp:byebye':
+            if usn in self.notifyCache:
+                # Several webOS builds send byebye while their UPnP process
+                # restarts even though the TV is still serving its LOCATION.
+                # Probe the cached endpoint before withdrawing it from other
+                # networks; a genuinely offline device is removed after the
+                # normal bounded liveness-failure threshold.
+                self.notifyCache[usn]['lastSent'] = 0
+                self.notifyCache[usn]['failCount'] = 0
+                self.logger.info('[SSDP repeat] %s said byebye, verifying cached endpoint before removal' % usn)
+            return
+
+        if nts != 'ssdp:alive':
+            return
+
+        now = time.time()
+        isNew = usn not in self.notifyCache
+        # A fresh, real NOTIFY from the device is itself proof of life, so any
+        # previous run of liveness-check failures is forgiven here.
+        self.notifyCache[usn] = {
+            'data': data,
+            'addr': addr,
+            'ttl': ttl,
+            'receivingInterface': receivingInterface,
+            'ipHeaderLength': ipHeaderLength,
+            'lastSent': now,
+            'expire': now + maxAge,
+            'maxAge': maxAge,
+            'checkHost': checkHost,
+            'checkPort': checkPort,
+            'failCount': 0,
+        }
+        if isNew:
+            self.logger.info('[SSDP repeat] Caching %s (liveness check: %s), will re-announce every %ds until byebye or %ds max-age' %
+                              (usn, checkHost and ('%s:%s' % (checkHost, checkPort)) or 'none available', self.ssdpRepeat, maxAge))
+
+    # A cached announcement is only re-announced while its device still looks
+    # reachable. This is a deliberately cheap, bounded, non-blocking TCP
+    # reachability probe against the host:port from the SSDP LOCATION or mDNS
+    # SRV record - not a full HTTP request. A completed handshake or a
+    # connection refusal proves that the device's IP stack replied; webOS can
+    # close a transient discovery port while the TV itself remains online.
+    # Only a timeout/no-route is treated as an offline device.
+    LIVENESS_CHECK_TIMEOUT = 0.3
+    LIVENESS_CHECK_MAX_FAILURES = 2
+
+    def isDeviceAlive(self, host, port):
+        if not host or not port:
+            # No LOCATION to check against - can't confirm either way, so
+            # don't punish the entry for a header it never had.
+            return True
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setblocking(False)
+        try:
+            try:
+                s.connect((host, port))
+            except BlockingIOError:
+                pass
+            except OSError as e:
+                # ECONNREFUSED is a response from the remote IP stack. It
+                # means this particular service is closed, not that the TV
+                # disappeared from the network.
+                return e.errno == errno.ECONNREFUSED
+
+            (_, writable, _) = select.select([], [s], [], PacketRelay.LIVENESS_CHECK_TIMEOUT)
+            if not writable:
+                return False  # no response within the timeout at all
+
+            # A refused connection (RST) also makes the socket 'writable'.
+            # It is still positive host-liveness evidence; SO_ERROR tells it
+            # apart from a successful service connection.
+            err = s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return err == 0 or err == errno.ECONNREFUSED
+        except Exception:
+            return False
+        finally:
+            s.close()
+
+    def replaySsdpCache(self):
+        now = time.time()
+        for usn in list(self.notifyCache.keys()):
+            entry = self.notifyCache[usn]
+
+            if now >= entry['expire']:
+                # CACHE-CONTROL limits a receiver's cache, but does not prove
+                # that an otherwise reachable device has disappeared. Keep a
+                # live TV visible by renewing the relay's cache only after a
+                # successful endpoint probe. An unreachable device still
+                # follows the regular two-failure removal path below.
+                entry['lastSent'] = now
+                if self.isDeviceAlive(entry['checkHost'], entry['checkPort']):
+                    entry['expire'] = now + entry['maxAge']
+                    entry['failCount'] = 0
+                    self.logger.info('[SSDP repeat] %s reached max-age but is still live; renewed cache for %ds' %
+                                     (usn, entry['maxAge']))
+                else:
+                    entry['failCount'] += 1
+                    self.logger.info('[SSDP repeat] max-age liveness check failed for %s (%s:%s) - %d/%d' %
+                                     (usn, entry['checkHost'], entry['checkPort'], entry['failCount'], PacketRelay.LIVENESS_CHECK_MAX_FAILURES))
+                    if entry['failCount'] >= PacketRelay.LIVENESS_CHECK_MAX_FAILURES:
+                        del self.notifyCache[usn]
+                        self.logger.info('[SSDP repeat] %s expired and failed liveness checks, dropped from cache' % usn)
+                    else:
+                        entry['expire'] = now + self.ssdpRepeat
+                continue
+
+            if now - entry['lastSent'] < self.ssdpRepeat:
+                continue
+
+            # Always advance lastSent on an attempt (pass or fail), so a
+            # failing device is re-checked every ssdpRepeat seconds - not
+            # every loop tick - and removal after LIVENESS_CHECK_MAX_FAILURES
+            # takes roughly failures*ssdpRepeat seconds of being unreachable,
+            # not a couple of seconds (which would make it flap-sensitive to
+            # a single dropped probe).
+            entry['lastSent'] = now
+
+            if not self.isDeviceAlive(entry['checkHost'], entry['checkPort']):
+                entry['failCount'] += 1
+                self.logger.info('[SSDP repeat] Liveness check failed for %s (%s:%s) - %d/%d' %
+                                  (usn, entry['checkHost'], entry['checkPort'], entry['failCount'], PacketRelay.LIVENESS_CHECK_MAX_FAILURES))
+                if entry['failCount'] >= PacketRelay.LIVENESS_CHECK_MAX_FAILURES:
+                    del self.notifyCache[usn]
+                    self.logger.info('[SSDP repeat] %s failed liveness check %d times in a row, dropped from cache' %
+                                      (usn, entry['failCount']))
+                continue
+
+            entry['failCount'] = 0
+
+            data = entry['data']
+            addr = entry['addr']
+            receivingInterface = entry['receivingInterface']
+            ipHeaderLength = entry['ipHeaderLength']
+            dstAddr = PacketRelay.SSDP_MCAST_ADDR
+
+            for tx in self.transmitters:
+                if receivingInterface == tx['interface']:
+                    continue
+
+                transmit = True
+                for net in self.ifFilter:
+                    (network, netmask) = '/' in net and net.split('/') or (net, '32')
+                    if self.onNetwork(entry['addr'], network, self.cidrToNetmask(int(netmask))) and tx['interface'] not in self.ifFilter[net]:
+                        transmit = False
+                        break
+                if not transmit:
+                    continue
+
+                if not ((dstAddr == tx['relay']['addr']) and tx['relay']['port'] == PacketRelay.SSDP_MCAST_PORT
+                        and (self.oneInterface or not self.onNetwork(addr, tx['addr'], tx['netmask']))):
+                    continue
+
+                destMac = self.etherAddrs[dstAddr]
+                txData = data
+                if tx['interface'] in self.masquerade:
+                    txData = txData[:12] + socket.inet_aton(tx['addr']) + txData[16:]
+
+                self.logger.info('[SSDP repeat] Re-announcing %s byte%s cached NOTIFY for %s [ttl %s] to %s:%s via %s/%s' % (
+                    len(txData), len(txData) != 1 and 's' or '', usn, entry['ttl'], dstAddr, PacketRelay.SSDP_MCAST_PORT, tx['interface'], tx['addr']))
+
+                try:
+                    self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, txData)
+                except Exception as e:
+                    self.logger.info('[SSDP repeat] Error re-transmitting cached NOTIFY for %s on %s: %s' % (usn, tx['interface'], str(e)))
+
+    MDNS_CACHE_MAX_ENTRIES = 256
+
+    @staticmethod
+    def skipDnsName(payload, offset):
+        """Return the byte after a DNS name without resolving compression."""
+        while offset < len(payload):
+            labelLength = payload[offset]
+            if labelLength == 0:
+                return offset + 1
+            if labelLength & 0xc0 == 0xc0:
+                return offset + 2 if offset + 1 < len(payload) else None
+            if labelLength & 0xc0:
+                return None
+            offset += labelLength + 1
+        return None
+
+    @staticmethod
+    def parseMdnsResponse(data, ipHeaderLength):
+        """
+        Identify a complete positive mDNS service response and the TCP
+        endpoint(s) advertised in its SRV records. We intentionally retain
+        the original packet rather than attempting to synthesize DNS records:
+        the original additional records (PTR/TXT/SRV/A) must stay consistent.
+        """
+        payload = data[ipHeaderLength+8:]
+        if len(payload) < 12:
+            return (False, False, False, [])
+
+        flags = struct.unpack('!H', payload[2:4])[0]
+        if flags & 0x8000 == 0:
+            return (False, False, False, [])
+
+        questionCount, answerCount, authorityCount, additionalCount = struct.unpack('!4H', payload[4:12])
+        offset = 12
+        for _ in range(questionCount):
+            offset = PacketRelay.skipDnsName(payload, offset)
+            if offset is None or offset + 4 > len(payload):
+                return (False, False, False, [])
+            offset += 4
+
+        hasPositiveRecord = False
+        hasGoodbyeRecord = False
+        servicePorts = []
+        for _ in range(answerCount + authorityCount + additionalCount):
+            offset = PacketRelay.skipDnsName(payload, offset)
+            if offset is None or offset + 10 > len(payload):
+                return (False, False, False, [])
+
+            recordType = struct.unpack('!H', payload[offset:offset+2])[0]
+            ttl = struct.unpack('!L', payload[offset+4:offset+8])[0]
+            dataLength = struct.unpack('!H', payload[offset+8:offset+10])[0]
+            recordDataOffset = offset + 10
+            if recordDataOffset + dataLength > len(payload):
+                return (False, False, False, [])
+
+            if ttl:
+                hasPositiveRecord = True
+                # SRV RDATA is priority (2), weight (2), port (2), target.
+                if recordType == 33 and dataLength >= 6:
+                    port = struct.unpack('!H', payload[recordDataOffset+4:recordDataOffset+6])[0]
+                    if port:
+                        servicePorts.append(port)
+            else:
+                hasGoodbyeRecord = True
+            offset = recordDataOffset + dataLength
+
+        # A standalone all-zero TTL response is an mDNS goodbye. A mixed
+        # response can legitimately carry a cache-flush record, so it must
+        # not erase the whole device cache.
+        return (True, hasPositiveRecord, hasGoodbyeRecord and not hasPositiveRecord, servicePorts)
+
+    def dropMdnsSource(self, sourceAddr):
+        removed = 0
+        for key in list(self.mdnsCache.keys()):
+            if self.mdnsCache[key]['sourceAddr'] == sourceAddr:
+                del self.mdnsCache[key]
+                removed += 1
+        return removed
+
+    def cacheMdnsResponse(self, data, addr, ttl, receivingInterface, ipHeaderLength):
+        (isResponse, hasPositiveRecord, isGoodbye, servicePorts) = PacketRelay.parseMdnsResponse(data, ipHeaderLength)
+        if not isResponse:
+            return
+
+        sourceAddr = socket.inet_ntoa(data[12:16])
+        if isGoodbye:
+            removed = self.dropMdnsSource(sourceAddr)
+            if removed:
+                self.logger.info('[mDNS repeat] %s said goodbye, dropped %d cached service response%s' %
+                                 (sourceAddr, removed, removed != 1 and 's' or ''))
+            return
+
+        # Any positive-TTL answer is worth keeping alive, not just a packet
+        # that happens to bundle an SRV record: real devices often split a
+        # PTR enumeration burst from the separate SRV/TXT/A packet, and both
+        # are legitimate, independently repeatable announcements. When an SRV
+        # record IS present we also get a port to use for the liveness probe
+        # below; when it isn't, isDeviceAlive() already treats a missing
+        # host/port as "can't confirm either way" and skips the probe, same
+        # as the SSDP path does for a NOTIFY with no LOCATION header.
+        if not hasPositiveRecord:
+            return
+
+        checkPort = servicePorts[0] if servicePorts else None
+
+        payload = data[ipHeaderLength+8:]
+        key = (sourceAddr, payload)
+        now = time.time()
+        isNew = key not in self.mdnsCache
+        if isNew and len(self.mdnsCache) >= PacketRelay.MDNS_CACHE_MAX_ENTRIES:
+            oldestKey = min(self.mdnsCache, key=lambda cachedKey: self.mdnsCache[cachedKey]['lastSeen'])
+            del self.mdnsCache[oldestKey]
+
+        self.mdnsCache[key] = {
+            'data': data,
+            'addr': addr,
+            'ttl': ttl,
+            'receivingInterface': receivingInterface,
+            'ipHeaderLength': ipHeaderLength,
+            'sourceAddr': sourceAddr,
+            'checkPort': checkPort,
+            'lastSent': now,
+            'lastSeen': now,
+            'failCount': 0,
+        }
+        if isNew:
+            self.logger.info('[mDNS repeat] Caching service response from %s%s, will re-announce every %ds while reachable' %
+                             (sourceAddr, checkPort and ':%d' % checkPort or ' (no SRV port - no liveness check)', self.mdnsRepeat))
+
+    def replayMdnsCache(self):
+        now = time.time()
+        for key in list(self.mdnsCache.keys()):
+            entry = self.mdnsCache[key]
+            if now - entry['lastSent'] < self.mdnsRepeat:
+                continue
+
+            # Do not make a powered-off device linger in remote pickers. A
+            # live endpoint keeps its announcement refreshed indefinitely,
+            # whereas two failed bounded probes remove it.
+            entry['lastSent'] = now
+            if not self.isDeviceAlive(entry['sourceAddr'], entry['checkPort']):
+                entry['failCount'] += 1
+                self.logger.info('[mDNS repeat] Liveness check failed for %s:%s - %d/%d' %
+                                 (entry['sourceAddr'], entry['checkPort'], entry['failCount'], PacketRelay.LIVENESS_CHECK_MAX_FAILURES))
+                if entry['failCount'] >= PacketRelay.LIVENESS_CHECK_MAX_FAILURES:
+                    del self.mdnsCache[key]
+                    self.logger.info('[mDNS repeat] %s:%s failed liveness checks, dropped from cache' %
+                                     (entry['sourceAddr'], entry['checkPort']))
+                continue
+
+            entry['failCount'] = 0
+            data = entry['data']
+            addr = entry['addr']
+            receivingInterface = entry['receivingInterface']
+            ipHeaderLength = entry['ipHeaderLength']
+            dstAddr = PacketRelay.MDNS_MCAST_ADDR
+
+            for tx in self.transmitters:
+                if receivingInterface == tx['interface']:
+                    continue
+
+                transmit = True
+                for net in self.ifFilter:
+                    (network, netmask) = '/' in net and net.split('/') or (net, '32')
+                    if self.onNetwork(entry['sourceAddr'], network, self.cidrToNetmask(int(netmask))) and tx['interface'] not in self.ifFilter[net]:
+                        transmit = False
+                        break
+                if not transmit:
+                    continue
+
+                if not ((dstAddr == tx['relay']['addr']) and tx['relay']['port'] == PacketRelay.MDNS_MCAST_PORT
+                        and (self.oneInterface or not self.onNetwork(addr, tx['addr'], tx['netmask']))):
+                    continue
+
+                destMac = self.etherAddrs[dstAddr]
+                txData = data
+                if tx['interface'] in self.masquerade:
+                    txData = txData[:12] + socket.inet_aton(tx['addr']) + txData[16:]
+
+                self.logger.info('[mDNS repeat] Re-announcing %s byte%s cached service response from %s:%s [ttl %s] to %s:%s via %s/%s' % (
+                    len(txData), len(txData) != 1 and 's' or '', entry['sourceAddr'], entry['checkPort'], entry['ttl'],
+                    dstAddr, PacketRelay.MDNS_MCAST_PORT, tx['interface'], tx['addr']))
+                try:
+                    self.transmitPacket(tx['socket'], tx['mac'], destMac, ipHeaderLength, txData)
+                except Exception as e:
+                    self.logger.info('[mDNS repeat] Error re-transmitting cached response from %s:%s on %s: %s' %
+                                     (entry['sourceAddr'], entry['checkPort'], tx['interface'], str(e)))
+
     def loop(self):
         # Record where the most recent SSDP searches came from, to relay unicast answers
         # Note: ideally we'd be more clever and record multiple, but in practice
@@ -497,6 +901,11 @@ class PacketRelay():
         while True:
             if self.remoteAddrs:
                 self.connectRemotes()
+
+            if self.ssdpRepeat:
+                self.replaySsdpCache()
+            if self.mdnsRepeat:
+                self.replayMdnsCache()
 
             additionalListeners = []
             if self.listenSock:
@@ -675,6 +1084,14 @@ class PacketRelay():
                                 and self.onNetwork(addr, tx['addr'], tx['netmask']):
                             receivingInterface = tx['interface']
                             broadcastPacket = (origDstAddr == tx['broadcast'])
+
+                if self.ssdpRepeat and origDstAddr == PacketRelay.SSDP_MCAST_ADDR and origDstPort == PacketRelay.SSDP_MCAST_PORT \
+                        and not broadcastPacket and re.search(b'NOTIFY \\* HTTP', data):
+                    self.cacheSsdpNotify(data, addr, ttl, receivingInterface, ipHeaderLength)
+
+                if self.mdnsRepeat and origDstAddr == PacketRelay.MDNS_MCAST_ADDR and origDstPort == PacketRelay.MDNS_MCAST_PORT \
+                        and not broadcastPacket:
+                    self.cacheMdnsResponse(data, addr, ttl, receivingInterface, ipHeaderLength)
 
                 for tx in self.transmitters:
                     # Re-transmit on all other interfaces than on the interface that we received this packet from...
@@ -897,6 +1314,18 @@ def main():
     parser.add_argument('--ssdpUnicastAddr',
                         help='IP address to listen to SSDP unicast replies, which will be'
                              ' relayed to the IP that sent the SSDP multicast query.')
+    parser.add_argument('--ssdpRepeat', type=int, default=0,
+                        help='Some SSDP devices only ever send periodic NOTIFY (ssdp:alive) '
+                             'announcements and never answer M-SEARCH directly. If set (seconds), '
+                             'the relay caches the most recent NOTIFY per device (by USN) and '
+                             're-announces it to the other interfaces every N seconds, independent '
+                             'of the device\'s own announce interval, while the device endpoint '
+                             'continues to answer a bounded liveness check. Try 20-30.')
+    parser.add_argument('--mdnsRepeat', type=int, default=60,
+                        help='Cache complete mDNS service announcements (such as Google Cast, '
+                             'Android TV Remote and AirPlay) and re-announce them every N seconds '
+                             'while their SRV endpoint remains reachable. The default 60 is below '
+                             'the common 120-second mDNS TTL; set 0 to disable.')
     parser.add_argument('--oneInterface', action='store_true',
                         help='Slightly dangerous: only one interface exists, connected to two networks.')
     parser.add_argument('--relay', nargs='*',
@@ -960,6 +1389,10 @@ def main():
         print('Invalid TTL (must be between 1 and 255)')
         return 1
 
+    if args.ssdpRepeat < 0 or args.mdnsRepeat < 0:
+        print('Invalid repeat interval (must be zero or a positive number of seconds)')
+        return 1
+
     if not args.foreground:
         pid = os.fork()
         if pid != 0:
@@ -994,6 +1427,8 @@ def main():
                               ifNameStructLen      = args.ifNameStructLen,
                               allowNonEther        = args.allowNonEther,
                               ssdpUnicastAddr      = args.ssdpUnicastAddr,
+                              ssdpRepeat           = args.ssdpRepeat,
+                              mdnsRepeat           = args.mdnsRepeat,
                               mdnsForceUnicast     = args.mdnsForceUnicast,
                               masquerade           = args.masquerade,
                               listen               = args.listen,
