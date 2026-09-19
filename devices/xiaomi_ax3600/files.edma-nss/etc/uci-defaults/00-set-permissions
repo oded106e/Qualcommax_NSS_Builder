@@ -1,3 +1,4 @@
 #!/bin/sh
 chmod +x /etc/ssh/*.sh /etc/ssh/*.py 2>/dev/null
+chmod +x /usr/sbin/udp-broadcast-relay-redux 2>/dev/null
 exit 0
