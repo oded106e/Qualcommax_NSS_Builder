@@ -1,5 +1,5 @@
 #!/bin/sh
 chmod +x /etc/ssh/*.sh 2>/dev/null
 chmod +x /usr/sbin/udpbroadcastrelay 2>/dev/null
-chmod +x /etc/init.d/udpbroadcastrelayy 2>/dev/null
+chmod +x /etc/init.d/udpbroadcastrelay 2>/dev/null
 exit 0
