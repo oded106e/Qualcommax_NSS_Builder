@@ -4,8 +4,8 @@ START=99
 STOP=10
 
 start() {
-    /usr/sbin/udpbroadcastrelay --id 1 --port 5353 --dev br-lan --dev br-smarthome --multicast 224.0.0.251 -f
-    /usr/sbin/udpbroadcastrelay --id 2 --port 1900 --multicast 239.255.255.250 --dev br-lan --dev br-smarthome -s 1.1.1.2 --msearch dial -f
+    /usr/sbin/udpbroadcastrelay --id 1 --port 5353 --dev br-lan --dev br-open --dev br-smarthome --multicast 224.0.0.251 -f
+    /usr/sbin/udpbroadcastrelay --id 2 --port 1900 --multicast 239.255.255.250 --dev br-lan --dev br-open --dev br-smarthome -s 1.1.1.2 --msearch dial -f
 }
 
 stop() {
