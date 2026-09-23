@@ -1,7 +1,9 @@
 #!/bin/sh
 MAC="7C:66:EF:F0:C4:3C"; IP="192.168.10.171"; IF="br-lan"; DUM="rdpsink"
 SYN="tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn and tcp dst port 3389 and dst host $IP"
-STAMP=/tmp/wol-last
+SELF=$$
+woke_at=0
+trap 'woke_at=$(date +%s)' USR1
 
 ip link show $DUM >/dev/null 2>&1 || { ip link add $DUM type bridge; ip link set $DUM up; }
 
@@ -13,8 +15,8 @@ release() { ip neigh del proxy $IP dev $IF 2>/dev/null
 up()      { ip neigh del $IP dev $IF 2>/dev/null
             ping -c1 -W1 $IP >/dev/null 2>&1
             ip neigh show $IP dev $IF | grep -qE 'REACH|STALE'; }
-wake()    { if has; then release; else up && return; fi
-            date +%s > $STAMP
+wake()    { has && release
+            kill -USR1 "$SELF"
             for n in 1 2 3; do etherwake -b -i $IF $MAC; sleep 1; done; }
 
 # RDP SYN from VPN or LAN -> wake if the PC is not answering
@@ -32,7 +34,7 @@ done &
 f=0
 while sleep 2; do
   has && continue
-  [ $(( $(date +%s) - $(cat $STAMP 2>/dev/null || echo 0) )) -lt 60 ] && { f=0; continue; }
+  [ $(( $(date +%s) - woke_at )) -lt 60 ] && { f=0; continue; }
   up && { f=0; continue; }
   f=$((f+1))
   [ $f -ge 4 ] && { hold; f=0; }
