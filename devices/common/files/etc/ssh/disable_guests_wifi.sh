@@ -14,17 +14,20 @@ fi
 
 # Infinite loop with a delay of 2 minutes between checks
 while true; do
-    # Check for associated stations on the specified interface
-    STA_COUNT=$(iw dev "$INTERFACE" station dump | grep -c Station)
-
-    # Check if the radio is enabled by querying iw command directly
-    RADIO_ENABLED=$(iw dev "$INTERFACE" info | grep 'type AP' | wc -l)
-
-    # Determine RADIO_STATUS based on the iw output
-    if [ "$RADIO_ENABLED" -gt 0 ]; then
-        RADIO_STATUS=0  # Radio is enabled
-    else
+    # Trust our own last UCI write instead of querying a netdev that may not
+    # exist while the radio is disabled (avoids "No such device" errors).
+    RADIO_DISABLED=$(uci -q get wireless."$RADIO".disabled)
+    if [ "$RADIO_DISABLED" = "1" ]; then
         RADIO_STATUS=1  # Radio is disabled
+    else
+        RADIO_STATUS=0  # Radio is enabled
+    fi
+
+    if [ "$RADIO_STATUS" -eq 0 ]; then
+        # Only query the interface when it actually exists
+        STA_COUNT=$(iw dev "$INTERFACE" station dump 2>/dev/null | grep -c Station)
+    else
+        STA_COUNT=0
     fi
 
     if [ "$STA_COUNT" -eq 0 ]; then
