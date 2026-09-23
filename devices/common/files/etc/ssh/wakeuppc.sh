@@ -5,22 +5,24 @@ SELF=$$
 woke_at=0
 trap 'woke_at=$(date +%s)' USR1
 
-ip link show $DUM >/dev/null 2>&1 || { ip link add $DUM type bridge; ip link set $DUM up; }
-
 has()     { ip neigh show proxy | grep -qF "$IP"; }
-hold()    { ip route replace $IP/32 dev $DUM
+hold()    { ip link show $DUM >/dev/null 2>&1 || { ip link add $DUM type bridge; ip link set $DUM up; }
+            ip route replace $IP/32 dev $DUM
             ip neigh replace proxy $IP dev $IF; }
 release() { ip neigh del proxy $IP dev $IF 2>/dev/null
-            ip route del $IP/32 dev $DUM 2>/dev/null; }
+            ip route del $IP/32 dev $DUM 2>/dev/null
+            ip link delete $DUM 2>/dev/null; }
 up()      { ip neigh del $IP dev $IF 2>/dev/null
             ping -c1 -W1 $IP >/dev/null 2>&1
             ip neigh show $IP dev $IF | grep -qE 'REACH|STALE'; }
 wake()    { has && release
             kill -USR1 "$SELF"
-            for n in 1 2 3; do etherwake -b -i $IF $MAC; sleep 1; done; }
+            etherwake -b -i $IF $MAC; }
 
 # RDP SYN from VPN or LAN -> wake if the PC is not answering
-tcpdump -i any -n -l -q "$SYN" 2>/dev/null | while read l; do wake; done &
+for i in wg0 $IF; do
+  tcpdump -i $i -n -l -q "$SYN" 2>/dev/null | while read l; do wake; done &
+done
 
 # PC woke up on its own (power button, keyboard...) -> stop impersonating it
 while :; do
