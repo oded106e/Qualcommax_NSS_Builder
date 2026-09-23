@@ -20,9 +20,7 @@ wake()    { has && release
             for n in 1 2 3; do etherwake -b -i $IF $MAC; sleep 1; done; }
 
 # RDP SYN from VPN or LAN -> wake if the PC is not answering
-for i in wg0 $IF; do
-  tcpdump -i $i -n -l -q "$SYN" 2>/dev/null | while read l; do wake; done &
-done
+tcpdump -i any -n -l -q "$SYN" 2>/dev/null | while read l; do wake; done &
 
 # PC woke up on its own (power button, keyboard...) -> stop impersonating it
 while :; do
