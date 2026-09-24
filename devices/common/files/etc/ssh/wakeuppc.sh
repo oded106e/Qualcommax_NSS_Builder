@@ -27,12 +27,11 @@ done
 # PC woke up on its own (power button, keyboard...) -> stop impersonating it
 while :; do
   has && tcpdump -i $IF -n -c1 -q "ether src $MAC" >/dev/null 2>&1 && has && release
-  sleep 2
 done &
 
 # PC silent for ~12s (and not just woken) -> answer ARP in its name
 f=0
-while sleep 2; do
+while :; do
   has && continue
   [ $(( $(date +%s) - woke_at )) -lt 60 ] && { f=0; continue; }
   up && { f=0; continue; }
