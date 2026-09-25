@@ -5,36 +5,86 @@ SELF=$$
 woke_at=0
 trap 'woke_at=$(date +%s)' USR1
 
+DEBUG="${DEBUG:-0}"
+dbg() { [ "$DEBUG" = "1" ] && logger -t wakeuppc "$*"; }
+dbg "start: MAC=$MAC IP=$IP IF=$IF DUM=$DUM"
+
 has()     { ip neigh show proxy | grep -qF "$IP"; }
-hold()    { ip link show $DUM >/dev/null 2>&1 || { ip link add $DUM type bridge; ip link set $DUM up; }
+hold()    { if ip link show $DUM >/dev/null 2>&1; then
+              dbg "hold(): dummy iface $DUM already exists"
+            else
+              dbg "hold(): creating dummy iface $DUM"
+              ip link add $DUM type bridge; ip link set $DUM up
+            fi
             ip route replace $IP/32 dev $DUM
-            ip neigh replace proxy $IP dev $IF; }
-release() { ip neigh del proxy $IP dev $IF 2>/dev/null
+            ip neigh replace proxy $IP dev $IF
+            dbg "hold(): holding proxy-ARP for $IP on $IF"; }
+release() { dbg "release(): releasing proxy-ARP for $IP"
+            ip neigh del proxy $IP dev $IF 2>/dev/null
             ip route del $IP/32 dev $DUM 2>/dev/null
             ip link delete $DUM 2>/dev/null; }
 up()      { ip neigh del $IP dev $IF 2>/dev/null
-            ping -c1 -W1 $IP >/dev/null 2>&1
+            ping -c1 -W2 $IP >/dev/null 2>&1
             ip neigh show $IP dev $IF | grep -qE 'REACH|STALE'; }
-wake()    { has && release
+wake()    { dbg "wake(): invoked"
+            if has; then
+              dbg "wake(): proxy-ARP was held, releasing"
+              release
+            elif up; then
+              dbg "wake(): PC already responds, skipping WoL"
+              return
+            fi
             kill -USR1 "$SELF"
+            dbg "wake(): sending WoL to $MAC via $IF"
             etherwake -b -i $IF $MAC; }
+
+cleanup() {
+    dbg "stopping: releasing state and killing process group"
+    has && release
+    kill -TERM 0 2>/dev/null
+    exit 0
+}
+trap cleanup TERM INT
 
 # RDP SYN from VPN or LAN -> wake if the PC is not answering
 for i in wg0 $IF; do
-  tcpdump -i $i -n -l -q "$SYN" 2>/dev/null | while read l; do wake; done &
+  dbg "starting SYN watcher on $i"
+  tcpdump -i $i -n -l -q "$SYN" 2>/dev/null | while read l; do dbg "RDP SYN seen on $i"; wake; done &
 done
 
 # PC woke up on its own (power button, keyboard...) -> stop impersonating it
+dbg "starting self-wake watcher on $IF"
 while :; do
-  has && tcpdump -i $IF -n -c1 -q "ether src $MAC" >/dev/null 2>&1 && has && release
+  if has; then
+    tcpdump -i $IF -n -c1 -q "ether src $MAC" >/dev/null 2>&1 && has && { dbg "PC woke on its own"; release; }
+  else
+    ping -c2 -i1 127.0.0.1 >/dev/null 2>&1
+  fi
 done &
 
 # PC silent for ~12s (and not just woken) -> answer ARP in its name
+dbg "starting silence watcher for $IP"
 f=0
 while :; do
-  has && continue
-  [ $(( $(date +%s) - woke_at )) -lt 60 ] && { f=0; continue; }
-  up && { f=0; continue; }
-  f=$((f+1))
-  [ $f -ge 4 ] && { hold; f=0; }
+  if has; then
+    # our own route to $IP is dead while impersonating (by design, see up()),
+    # so a real ping would fail instantly here instead of pacing - use loopback.
+    ping -c2 -i2 127.0.0.1 >/dev/null 2>&1
+  elif [ $(( $(date +%s) - woke_at )) -lt 60 ]; then
+    f=0
+    ping -c2 -i2 $IP >/dev/null 2>&1
+  else
+    ip neigh del $IP dev $IF 2>/dev/null
+    if ping -c2 -i2 -W2 $IP >/dev/null 2>&1 && ip neigh show $IP dev $IF | grep -qE 'REACH|STALE'; then
+      f=0
+    else
+      f=$((f+1))
+      dbg "PC not responding ($f/4)"
+      if [ $f -ge 4 ]; then
+        dbg "PC silent for ~12s, holding proxy-ARP"
+        hold
+        f=0
+      fi
+    fi
+  fi
 done
