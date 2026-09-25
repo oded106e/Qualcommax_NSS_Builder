@@ -27,13 +27,7 @@ up()      { ip neigh del $IP dev $IF 2>/dev/null
             ping -c1 -W2 $IP >/dev/null 2>&1
             ip neigh show $IP dev $IF | grep -qE 'REACH|STALE'; }
 wake()    { dbg "wake(): invoked"
-            if has; then
-              dbg "wake(): proxy-ARP was held, releasing"
-              release
-            elif up; then
-              dbg "wake(): PC already responds, skipping WoL"
-              return
-            fi
+            has && { dbg "wake(): proxy-ARP was held, releasing"; release; }
             kill -USR1 "$SELF"
             dbg "wake(): sending WoL to $MAC via $IF"
             etherwake -b -i $IF $MAC; }
