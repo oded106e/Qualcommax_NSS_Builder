@@ -2,11 +2,6 @@
 RADIO="default_radio0"
 
 DEBUG="${DEBUG:-0}"
-# Never pass a raw logread line to dbg(), and never log unconditionally
-# on every line seen: this script reads its own logger output back
-# through the same logread loop, so an unfiltered/echoed debug line
-# would re-match the case below (or amplify itself) forever. Only log
-# at decisive branch points.
 dbg() { [ "$DEBUG" = "1" ] && logger -t disable_guests_wifi "$*"; }
 
 INTERFACE=$(uci get wireless.default_radio0.ifname 2>/dev/null)
@@ -29,9 +24,20 @@ disable_radio() {
     dbg "disable_radio(): $RADIO disabled"
 }
 
+killtree() {
+    for pid in /proc/[0-9]*; do
+        p=${pid#/proc/}
+        [ -r "$pid/stat" ] || continue
+        ppid=$(awk '{print $4}' "$pid/stat" 2>/dev/null)
+        [ "$ppid" = "$1" ] || continue
+        killtree "$p"
+        kill -TERM "$p" 2>/dev/null
+    done
+}
+
 cleanup() {
-    dbg "stopping: killing process group"
-    kill -TERM 0 2>/dev/null
+    dbg "stopping: killing child processes"
+    killtree "$$"
     exit 0
 }
 trap cleanup TERM INT
@@ -41,7 +47,6 @@ logread -f | while read -r line; do
     case "$line" in
         *"Open-WIFI: AP-ENABLED"*)
             dbg "AP-ENABLED, waiting up to 120s for a connection"
-            # No one connected within 2 minutes of turning it on -> back off.
             deadline=$(( $(date +%s) + 120 ))
             got_connection=0
             while :; do
@@ -69,7 +74,6 @@ logread -f | while read -r line; do
                 dbg "already disabled, ignoring"
                 continue
             fi
-            # let the kernel's station table settle before trusting it
             read -t 1 _
             STA_COUNT=$(iw dev "$INTERFACE" station dump 2>/dev/null | grep -c Station)
             dbg "STA_COUNT=$STA_COUNT"
