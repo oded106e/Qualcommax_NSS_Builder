@@ -38,10 +38,21 @@ wake()    { dbg "wake(): invoked"
             dbg "wake(): sending WoL to $MAC via $IF"
             etherwake -b -i $IF $MAC; }
 
+killtree() {
+    for pid in /proc/[0-9]*; do
+        p=${pid#/proc/}
+        [ -r "$pid/stat" ] || continue
+        ppid=$(awk '{print $4}' "$pid/stat" 2>/dev/null)
+        [ "$ppid" = "$1" ] || continue
+        killtree "$p"
+        kill -TERM "$p" 2>/dev/null
+    done
+}
+
 cleanup() {
-    dbg "stopping: releasing state and killing process group"
+    dbg "stopping: releasing state and killing child processes"
     has && release
-    kill -TERM 0 2>/dev/null
+    killtree "$SELF"
     exit 0
 }
 trap cleanup TERM INT
@@ -67,8 +78,6 @@ dbg "starting silence watcher for $IP"
 f=0
 while :; do
   if has; then
-    # our own route to $IP is dead while impersonating (by design, see up()),
-    # so a real ping would fail instantly here instead of pacing - use loopback.
     ping -c2 -i2 127.0.0.1 >/dev/null 2>&1
   elif [ $(( $(date +%s) - woke_at )) -lt 60 ]; then
     f=0
