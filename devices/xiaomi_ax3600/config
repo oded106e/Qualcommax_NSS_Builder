@@ -25,6 +25,7 @@ CONFIG_NSS_MEM_PROFILE_MEDIUM=y
 CONFIG_PACKAGE_openssh-server=n
 CONFIG_PACKAGE_openssh-server-pam=y
 CONFIG_PACKAGE_google-authenticator-libpam=y
+CONFIG_PACKAGE_luci-plugin-2fa=y
 
 ## Dynamic DNS (DDNS)
 CONFIG_PACKAGE_ddns-scripts=y
