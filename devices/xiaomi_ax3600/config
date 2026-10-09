@@ -3,69 +3,73 @@
 #
 # Concatenated onto devices/common/config by prepare-build.sh.
 #
-
+ 
 CONFIG_TARGET_qualcommax_ipq807x=y
 CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600=y
-
+ 
 # 512 MB board: the ath11k profile is also forced by kmod-ath11k's NSS block,
 # and the NSS MEDIUM profile replaces the ipq807x default (HIGH), which does
 # not fit here.
-
-##qca9887
-CONFIG_ATH10K-CT_LEDS=y
-CONFIG_PACKAGE_ath10k-board-qca9887=y
-CONFIG_PACKAGE_ath10k-firmware-qca9887=y
-CONFIG_PACKAGE_kmod-ath10k-ct-smallbuffers=y
-
-## Device Memory Profiles
-CONFIG_TARGET_qualcommax_ipq807x_DEVICE_xiaomi_ax3600=y
 CONFIG_ATH11K_MEM_PROFILE_512M=y
 CONFIG_NSS_MEM_PROFILE_MEDIUM=y
-
-## OpenSSH with PAM Support (Override)
+ 
+## QCA9887 IoT radio — kept ON in this fork (upstream turns it off).
+## The board's DEVICE_PACKAGES already pull smallbuffers + the -ct firmware;
+## the non-ct firmware ships the same file, so keep it out.
+CONFIG_ATH10K-CT_LEDS=y
+CONFIG_PACKAGE_kmod-ath10k-ct-smallbuffers=y
+CONFIG_PACKAGE_ath10k-firmware-qca9887-ct=y
+CONFIG_PACKAGE_ath10k-board-qca9887=y
+CONFIG_PACKAGE_ath10k-firmware-qca9887=n
+ 
+## Hardware this board does not have.
+CONFIG_PACKAGE_kmod-phy-aquantia=n
+ 
+## USB: common/config now builds in USB storage, and stock OpenWrt ships the
+## USB stack for this board. To drop USB entirely, uncomment ALL of these:
+# CONFIG_PACKAGE_kmod-usb-storage=n
+# CONFIG_PACKAGE_kmod-usb-storage-uas=n
+# CONFIG_PACKAGE_block-mount=n
+# CONFIG_PACKAGE_kmod-usb-core=n
+# CONFIG_PACKAGE_kmod-usb-dwc3=n
+# CONFIG_PACKAGE_kmod-usb-dwc3-qcom=n
+# CONFIG_PACKAGE_kmod-usb-xhci-hcd=n
+# CONFIG_PACKAGE_kmod-usb3=n
+ 
+## OpenSSH with PAM + 2FA (dropbear is already off in common/config)
 CONFIG_PACKAGE_openssh-server=n
 CONFIG_PACKAGE_openssh-server-pam=y
 CONFIG_PACKAGE_google-authenticator-libpam=y
 CONFIG_PACKAGE_luci-plugin-2fa=y
-
-## Dynamic DNS (DDNS)
+ 
+## Dynamic DNS
 CONFIG_PACKAGE_ddns-scripts=y
 CONFIG_PACKAGE_luci-app-ddns=y
-
-## Etherwake (Wake-on-LAN)
+ 
+## Wake-on-LAN
 CONFIG_PACKAGE_etherwake=y
 CONFIG_PACKAGE_luci-app-wol=y
-
-## Web Terminal (ttyd)
+ 
+## Web terminal
 CONFIG_PACKAGE_ttyd=y
 CONFIG_PACKAGE_luci-app-ttyd=y
-
-## Python, Mail, Diagnostic Tools & Policy Based Routing
+ 
+## Python, mail, diagnostics, policy-based routing
 CONFIG_PACKAGE_python3=y
-CONFIG_PACKAGE_python3-light=n
 CONFIG_PACKAGE_msmtp-mta=y
 CONFIG_PACKAGE_nail=y
 CONFIG_PACKAGE_tcpdump=y
 CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
 CONFIG_PACKAGE_luci-app-pbr=y
-
-## Wireguard VPN
+ 
+## WireGuard
 CONFIG_PACKAGE_kmod-wireguard=y
 CONFIG_PACKAGE_wireguard-tools=y
 CONFIG_PACKAGE_luci-proto-wireguard=y
-
-## UPnP Daemon & UI
+ 
+## UPnP
 CONFIG_PACKAGE_luci-app-upnp=y
-
-## Network & Driver Tweaks
+ 
+## Network & driver tweaks
 CONFIG_PACKAGE_kmod-tcp-bbr=y
 CONFIG_ATH11K_DEBUGFS_STA=n
-CONFIG_ATH11K_THERMAL=n
-
-## Disable Unused USB & Ethernet Hardware (Slim Image)
-CONFIG_PACKAGE_kmod-phy-aquantia=n
-CONFIG_PACKAGE_kmod-usb-core=n
-CONFIG_PACKAGE_kmod-usb-dwc3=n
-CONFIG_PACKAGE_kmod-usb-dwc3-qcom=n
-CONFIG_PACKAGE_kmod-usb-xhci-hcd=n
-CONFIG_PACKAGE_kmod-usb3=n
