@@ -1,0 +1,28 @@
+From: oded106e
+Subject: [PATCH] luci-app-upnp: list nftables port maps that carry a counter
+
+miniupnpd >= 2.3.10 built for nftables always adds a counter to its DNAT
+rules (ENABLE_NFT_RULE_COUNTER), e.g.
+
+  iif "wan" @nh,72,8 0x11 th dport 3074 counter packets 0 bytes 0 dnat ip to ...
+
+The regex expects "dnat" right after the port, so no rule matches and the
+Active Service Port Maps table stays empty. Skip whatever sits in between,
+as openwrt/luci#8415 does.
+
+Drop this patch once the LuCI feed carries that change (the build then
+stops with "does not apply to feeds/luci").
+---
+diff --git a/applications/luci-app-upnp/root/usr/share/rpcd/ucode/luci.upnp b/applications/luci-app-upnp/root/usr/share/rpcd/ucode/luci.upnp
+index f72b57b..07faed5 100644
+--- a/applications/luci-app-upnp/root/usr/share/rpcd/ucode/luci.upnp
++++ b/applications/luci-app-upnp/root/usr/share/rpcd/ucode/luci.upnp
+@@ -67,7 +67,7 @@ const methods = {
+ 
+ 			if (nft) {
+ 				for (let line = nft.read('line'), num = 1; length(line); line = nft.read('line')) {
+-					let m = match(line, /^\t\tiif ".+" @nh,72,8 (0x6|0x11) th dport ([0-9]+) dnat ip to ([0-9.]+):([0-9]+)/);
++					let m = match(line, /^\t\tiif ".+" @nh,72,8 (0x6|0x11) th dport ([0-9]+).* dnat ip to ([0-9.]+):([0-9]+)/);
+ 
+ 					if (m) {
+ 						push(rules, {
